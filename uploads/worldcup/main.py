@@ -218,6 +218,27 @@ def calc_points(match: dict, predicted_winner: str) -> float:
 
     return s if predicted_winner == ht else 2.0 - s
 
+def default_pick(match: dict) -> str:
+    """System default team for a match — mirrors the frontend rule:
+    the handicap team when there's a line, otherwise the home (left) team."""
+    return match["handicap_team"] if (match.get("handicap_value") or 0) > 0 else match["team_home"]
+
+def ensure_default_predictions(conn, match: dict) -> int:
+    """Persist the system default pick for every non-admin user who hasn't
+    submitted a prediction for this match. This is the safety net that keeps
+    the displayed default in sync with real backend data (and scoring).
+    Returns the number of default rows created."""
+    team = default_pick(match)
+    missing = conn.execute(
+        "SELECT id FROM users WHERE is_admin=0 "
+        "AND id NOT IN (SELECT user_id FROM predictions WHERE match_id=?)",
+        (match["id"],)).fetchall()
+    for u in missing:
+        conn.execute(
+            "INSERT OR IGNORE INTO predictions (user_id, match_id, predicted_winner) VALUES (?,?,?)",
+            (u["id"], match["id"], team))
+    return len(missing)
+
 # ─── Endpoints ───────────────────────────────────────────────
 @app.post("/token")
 def login(form: OAuth2PasswordRequestForm = Depends()):
@@ -404,6 +425,7 @@ def set_result(body: ResultIn, user=Depends(require_admin)):
     match = dict(match)
     conn.execute("UPDATE matches SET score_home=?, score_away=?, status='finished', locked=1 WHERE id=?",
                  (body.score_home, body.score_away, body.match_id))
+    ensure_default_predictions(conn, match)  # fill in defaults so everyone is scored
     preds = conn.execute("SELECT * FROM predictions WHERE match_id=?", (body.match_id,)).fetchall()
     updated_match = {**match, "score_home": body.score_home, "score_away": body.score_away}
     for p in preds:
@@ -417,9 +439,14 @@ def set_result(body: ResultIn, user=Depends(require_admin)):
 def lock_match(body: LockIn, user=Depends(require_admin)):
     conn = get_db()
     conn.execute("UPDATE matches SET locked=? WHERE id=?", (1 if body.locked else 0, body.match_id))
+    created = 0
+    if body.locked:  # betting closed — lock in the default pick for anyone who hasn't bet
+        match = conn.execute("SELECT * FROM matches WHERE id=?", (body.match_id,)).fetchone()
+        if match:
+            created = ensure_default_predictions(conn, dict(match))
     conn.commit()
     conn.close()
-    return {"ok": True}
+    return {"ok": True, "defaults_added": created}
 
 _FORBIDDEN = re.compile(r"\b(insert|update|delete|drop|alter|attach|detach|create|replace|pragma|vacuum|reindex)\b", re.I)
 
