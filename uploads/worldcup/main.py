@@ -19,7 +19,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-DB_PATH = "worldcup.db"
+DB_PATH = os.path.join(os.environ.get("DATA_DIR", "."), "worldcup.db")
 
 STAGES = ["Group Stage", "Round of 32", "Round of 16", "Quarter-finals",
           "Semi-finals", "Third-Place Play-off", "The Final"]
