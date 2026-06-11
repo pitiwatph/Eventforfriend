@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>Event For Friend · Points Activity</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Kanit:ital,wght@0,400;0,500;0,600;0,700;1,600;1,700&family=Noto+Sans+Thai:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ══ LOGIN (self-registration disabled — Admin creates users) ══ -->
+<div class="auth" id="authScreen">
+  <div class="auth-inner">
+    <div class="auth-logo">
+      <div class="cup-big">🏆</div>
+      <p>กิจกรรมสะสมแต้มเพื่อความบันเทิง · Points Activity</p>
+    </div>
+    <div class="auth-card">
+      <div class="auth-title">เข้าสู่ระบบ <span class="en">Sign in</span></div>
+      <div class="auth-err" id="authErr"></div>
+      <form id="loginForm" onsubmit="App.doLogin(event)">
+        <div class="form-row">
+          <label class="fld">ชื่อผู้ใช้ <span class="en">Username</span></label>
+          <input class="in" id="loginUser" autocomplete="username" placeholder="username" required>
+        </div>
+        <div class="form-row">
+          <label class="fld">รหัสผ่าน <span class="en">Password</span></label>
+          <input class="in" id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••" required>
+        </div>
+        <button class="btn btn-gold btn-block" type="submit">เข้าสู่ระบบ · Sign in</button>
+      </form>
+      <div class="auth-note">ไม่มีบัญชี? ติดต่อแอดมินเพื่อสร้างผู้ใช้ให้ · Accounts are created by an admin</div>
+      <div class="hint-creds" id="demoHint" style="display:none">
+        โหมดเดโม · Demo — ลองด้วย <code>guest</code> / <code>1234</code> หรือ <code>admin</code> / <code>admin1234</code>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ APP ════════════════════════════════════════════════════ -->
+<div class="shell" id="appShell" style="display:none">
+  <div class="demo-flag" id="demoFlag">⚡ โหมดเดโม — Demo mode (ไม่ได้เชื่อมต่อเซิร์ฟเวอร์)</div>
+
+  <header class="appbar">
+    <div class="brand">
+      <div class="cup">🏆</div>
+      <div class="t"><b>Event For Friend</b><span>Points Activity</span></div>
+    </div>
+    <div class="appbar-user">
+      <button class="icon-btn" id="tweakBtn" title="ปรับแต่ง / Tweaks" onclick="Tweaks.toggle()">⚙</button>
+      <button class="avatar" id="topAvatar" title="โปรไฟล์ / Profile" onclick="App.openProfile()">?</button>
+      <button class="icon-btn" title="ออกจากระบบ / Logout" onclick="App.logout()">⏻</button>
+    </div>
+  </header>
+
+  <main class="scroll" id="scroll">
+
+    <!-- ── PREDICT ── -->
+    <section class="view active" id="view-matches" data-screen-label="Predict">
+      <div id="meHero"></div>
+      <div id="nextHero"></div>
+      <div class="section-label"><span class="dot"></span> นัดที่เปิดให้ทาย · Open fixtures</div>
+      <div id="matchList"></div>
+    </section>
+
+    <!-- ── RESULTS ── -->
+    <section class="view" id="view-results" data-screen-label="Results">
+      <div class="page-head">
+        <h1>ผลการแข่งขัน <span class="en">Results</span></h1>
+        <div class="sub">นัดที่จบแล้ว แยกตามรอบ · finished fixtures by stage</div>
+      </div>
+      <div id="resultsSummary"></div>
+      <div id="resultsList"></div>
+    </section>
+
+    <!-- ── LEADERBOARD ── -->
+    <section class="view" id="view-leaderboard" data-screen-label="Leaderboard">
+      <div class="page-head">
+        <h1>ตารางคะแนน <span class="en">Leaderboard</span></h1>
+        <div class="sub">อันดับจากแต้มทายผลรวม · ranked by total points</div>
+      </div>
+      <div id="podium"></div>
+      <div id="lbList" class="lb-list"></div>
+    </section>
+
+    <!-- ── HISTORY ── -->
+    <section class="view" id="view-history" data-screen-label="History">
+      <div class="page-head">
+        <h1>ประวัติการทาย <span class="en">My Predictions</span></h1>
+        <div class="sub">ผลการทายทั้งหมดของคุณ · everything you've called</div>
+      </div>
+      <div id="histSummary"></div>
+      <div id="histList" class="hist"></div>
+    </section>
+
+    <!-- ── ADMIN ── -->
+    <section class="view" id="view-admin" data-screen-label="Admin">
+      <div class="page-head">
+        <h1>แอดมิน <span class="en">Admin</span></h1>
+        <div class="sub">จัดการนัด · ผู้ใช้ · ทีม · ข้อมูล</div>
+      </div>
+
+      <!-- New fixture -->
+      <div class="card">
+        <div class="section-label" style="margin-top:0"><span class="dot"></span> เพิ่มนัดใหม่ · New fixture</div>
+        <form id="addMatchForm" onsubmit="App.addMatch(event)">
+          <div class="form-2">
+            <div class="form-row">
+              <label class="fld">เจ้าบ้าน <span class="en">Home</span></label>
+              <input class="in" id="amHome" list="teamNames" placeholder="Spain" required oninput="App.onTeamInput('home')">
+            </div>
+            <div class="form-row">
+              <label class="fld">ทีมเยือน <span class="en">Away</span></label>
+              <input class="in" id="amAway" list="teamNames" placeholder="Germany" required oninput="App.onTeamInput('away')">
+            </div>
+          </div>
+
+          <div class="form-row">
+            <label class="fld">ธงทีม <span class="en">Team flags</span></label>
+            <div class="flag-help">เลือกทีมจากทะเบียน → ระบบใส่ธงให้อัตโนมัติ หรือวางลิงก์รูปธง (URL) เอง · auto-filled from the team registry; paste a URL to override</div>
+            <div class="form-2">
+              <div class="flagpick">
+                <span class="flag-prev" id="amHomeFlagPrev"></span>
+                <input class="in" id="amHomeFlag" placeholder="ธงเจ้าบ้าน (URL)" autocomplete="off" oninput="App.onFlagInput('home')">
+              </div>
+              <div class="flagpick">
+                <span class="flag-prev" id="amAwayFlagPrev"></span>
+                <input class="in" id="amAwayFlag" placeholder="ธงทีมเยือน (URL)" autocomplete="off" oninput="App.onFlagInput('away')">
+              </div>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <label class="fld">ทีมต่อ (แฮนดิแคป) <span class="en">Handicap team</span></label>
+            <div class="seg" id="amHdcpSel"></div>
+          </div>
+          <div class="form-2">
+            <div class="form-row">
+              <label class="fld">ค่าแฮนดิแคป <span class="en">Line</span></label>
+              <select class="in" id="amHdcpVal">
+                <option value="0">0 — เสมอ (draw)</option>
+                <option value="0.25">0.25</option>
+                <option value="0.5" selected>0.5</option>
+                <option value="0.75">0.75</option>
+                <option value="1">1.0</option>
+                <option value="1.25">1.25</option>
+                <option value="1.5">1.5</option>
+                <option value="1.75">1.75</option>
+                <option value="2">2.0</option>
+                <option value="2.25">2.25</option>
+                <option value="2.5">2.5</option>
+                <option value="2.75">2.75</option>
+                <option value="3">3.0</option>
+                <option value="3.25">3.25</option>
+                <option value="3.5">3.5</option>
+                <option value="3.75">3.75</option>
+                <option value="4">4.0</option>
+                <option value="4.25">4.25</option>
+                <option value="4.5">4.5</option>
+                <option value="4.75">4.75</option>
+                <option value="5">5.0</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="fld">รอบ <span class="en">Stage</span></label>
+              <select class="in" id="amStage"></select>
+            </div>
+          </div>
+          <div class="form-row">
+            <label class="fld">เวลาเตะ <span class="en">Kickoff</span></label>
+            <input class="in" id="amKickoff" type="datetime-local" required>
+          </div>
+          <button class="btn btn-gold btn-block" type="submit">+ เพิ่มนัด · Add fixture</button>
+        </form>
+      </div>
+
+      <!-- Fixtures / results / lock -->
+      <div class="card">
+        <div class="section-label" style="margin-top:0"><span class="dot"></span> นัด · ผล · ปิดรับทาย</div>
+        <div id="adminMatches"></div>
+      </div>
+
+      <!-- Create user -->
+      <div class="card">
+        <div class="section-label" style="margin-top:0"><span class="dot"></span> สร้างผู้ใช้ · Create user</div>
+        <form id="createUserForm" onsubmit="App.createUser(event)">
+          <div class="form-row">
+            <label class="fld">ชื่อเล่นเจ้าของ User <span class="en">Display name</span></label>
+            <input class="in" id="cuName" placeholder="เช่น เจมส์" required>
+          </div>
+          <div class="form-2">
+            <div class="form-row">
+              <label class="fld">Username</label>
+              <input class="in" id="cuUser" autocomplete="off" placeholder="james" required>
+            </div>
+            <div class="form-row">
+              <label class="fld">Password</label>
+              <input class="in" id="cuPass" placeholder="••••••" required>
+            </div>
+          </div>
+          <button class="btn btn-gold btn-block" type="submit">+ สร้างผู้ใช้ · Create</button>
+        </form>
+        <div id="adminUsers" class="urlist"></div>
+      </div>
+
+      <!-- Teams registry -->
+      <div class="card">
+        <div class="section-label" style="margin-top:0"><span class="dot"></span> ทะเบียนทีม + ธง · Teams &amp; flags</div>
+        <div class="flag-help">กำหนดธงของแต่ละทีมไว้ล่วงหน้า เพื่อไม่ต้องใส่ URL ทุกครั้งตอนเพิ่มนัด</div>
+        <form id="teamForm" onsubmit="App.saveTeam(event)">
+          <div class="flagpick" style="margin-bottom:11px">
+            <span class="flag-prev" id="tmPrev"></span>
+            <input class="in" id="tmName" placeholder="ชื่อทีม · Team name" autocomplete="off" required oninput="App.updateTeamPrev()">
+          </div>
+          <div class="form-row">
+            <input class="in" id="tmFlag" placeholder="ลิงก์รูปธง · Flag image URL" autocomplete="off" oninput="App.updateTeamPrev()">
+          </div>
+          <button class="btn btn-gold btn-block" type="submit">บันทึกทีม · Save team</button>
+        </form>
+        <div id="adminTeams" class="tlist"></div>
+      </div>
+
+      <!-- SQL console -->
+      <div class="card">
+        <div class="section-label" style="margin-top:0"><span class="dot"></span> คอนโซลข้อมูล · Data query (SQL)</div>
+        <div class="flag-help">รันได้เฉพาะคำสั่ง <code>SELECT</code> (อ่านอย่างเดียว) บนฐานข้อมูลหลังบ้าน</div>
+        <div class="sql-samples">
+          <button type="button" onclick="App.sqlSample('SELECT * FROM leaderboard')">leaderboard</button>
+          <button type="button" onclick="App.sqlSample('SELECT id, username, display_name FROM users')">users</button>
+          <button type="button" onclick="App.sqlSample('SELECT team_home, team_away, stage, status FROM matches')">matches</button>
+          <button type="button" onclick="App.sqlSample('SELECT COUNT(*) FROM predictions')">count predictions</button>
+        </div>
+        <textarea class="in sql-box" id="sqlBox" rows="3" placeholder="SELECT * FROM matches WHERE status='finished'"></textarea>
+        <button class="btn btn-gold btn-block" onclick="App.runQuery()">▶ รัน · Run</button>
+        <div id="sqlOut" class="sql-out"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <nav class="tabbar" id="tabbar">
+    <button class="tab active" data-view="matches" onclick="App.go('matches')">
+      <span class="ic">⚽</span><span class="lb">ทายผล</span><span class="en">Predict</span>
+    </button>
+    <button class="tab" data-view="results" onclick="App.go('results')">
+      <span class="ic">📊</span><span class="lb">ผลแข่ง</span><span class="en">Results</span>
+    </button>
+    <button class="tab" data-view="leaderboard" onclick="App.go('leaderboard')">
+      <span class="ic">🏅</span><span class="lb">คะแนน</span><span class="en">Ranks</span>
+    </button>
+    <button class="tab" data-view="history" onclick="App.go('history')">
+      <span class="ic">📜</span><span class="lb">ประวัติ</span><span class="en">History</span>
+    </button>
+    <button class="tab" data-view="admin" id="adminTab" onclick="App.go('admin')" style="display:none">
+      <span class="ic">🛠️</span><span class="lb">แอดมิน</span><span class="en">Admin</span>
+    </button>
+  </nav>
+</div>
+
+<datalist id="teamNames"></datalist>
+<div id="toast"></div>
+
+<!-- ══ PROFILE / EDIT-USER MODAL ════════════════════════════ -->
+<div id="modal" class="modal-overlay" onclick="App.modalBg(event)">
+  <div class="modal-card">
+    <div class="modal-head"><b id="modalTitle">โปรไฟล์ของฉัน</b><button type="button" onclick="App.closeModal()">×</button></div>
+    <form id="profileForm" onsubmit="App.saveProfile(event)">
+      <div class="form-row">
+        <label class="fld">ชื่อเล่น <span class="en">Display name</span></label>
+        <input class="in" id="pfName" autocomplete="off" required>
+      </div>
+      <div class="form-row" id="pfUserRow" style="display:none">
+        <label class="fld">Username</label>
+        <input class="in" id="pfUser" autocomplete="off" disabled>
+      </div>
+      <div class="form-row">
+        <label class="fld">รหัสผ่านใหม่ <span class="en">New password</span></label>
+        <input class="in" id="pfPass" autocomplete="new-password" placeholder="เว้นว่างไว้ถ้าไม่เปลี่ยน">
+      </div>
+      <button class="btn btn-gold btn-block" type="submit">บันทึก · Save</button>
+    </form>
+  </div>
+</div>
+
+<!-- ══ TWEAKS PANEL ══════════════════════════════════════════ -->
+<div id="tweaks">
+  <div class="tw-head" id="twHead">
+    <b>⚙ ปรับแต่ง · Tweaks</b>
+    <button onclick="Tweaks.toggle()" title="ปิด">×</button>
+  </div>
+  <div class="tw-body" id="twBody"></div>
+</div>
+
+<script src="flags.js"></script>
+<script src="demo.js"></script>
+<script src="app.js"></script>
+<script src="tweaks.js"></script>
+</body>
+</html>

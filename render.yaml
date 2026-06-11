@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: worldcup-prediction
+    env: python
+    region: singapore
+    plan: free
+    buildCommand: pip install -r uploads/worldcup/requirements.txt
+    startCommand: cd uploads/worldcup && uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"

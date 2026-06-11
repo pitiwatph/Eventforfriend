@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ทายผลฟุตบอลโลก 2026</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#0d1b2a;color:#e0e6f0;min-height:100vh}
+a{color:inherit;text-decoration:none}
+
+/* Layout */
+#app{display:flex;flex-direction:column;min-height:100vh}
+nav{background:#0b3d6b;padding:0 24px;display:flex;align-items:center;justify-content:space-between;height:56px;border-bottom:2px solid #c9a82c}
+.nav-brand{font-size:18px;font-weight:700;color:#c9a82c;display:flex;align-items:center;gap:8px}
+.nav-user{display:flex;align-items:center;gap:16px;font-size:13px;color:#90caf9}
+.nav-tabs{display:flex;gap:4px}
+.tab-btn{background:none;border:none;color:#90caf9;padding:8px 16px;cursor:pointer;font-size:13px;border-radius:6px;transition:.2s}
+.tab-btn:hover{background:rgba(255,255,255,.08)}
+.tab-btn.active{background:#c9a82c;color:#0b3d6b;font-weight:700}
+.logout-btn{background:none;border:1px solid #555;color:#aaa;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;transition:.2s}
+.logout-btn:hover{border-color:#e74c3c;color:#e74c3c}
+
+main{flex:1;padding:24px;max-width:960px;margin:0 auto;width:100%}
+section{display:none}
+section.active{display:block}
+
+/* Cards */
+.card{background:#1a2a3a;border:1px solid #2c3e50;border-radius:12px;padding:20px;margin-bottom:16px}
+.card-header{font-size:15px;font-weight:700;color:#c9a82c;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+
+/* Forms */
+.form-group{margin-bottom:14px}
+label{display:block;font-size:12px;color:#90caf9;margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+input,select{width:100%;padding:10px 14px;background:#0d1b2a;border:1px solid #2c3e50;border-radius:8px;color:#e0e6f0;font-size:14px;transition:.2s}
+input:focus,select:focus{outline:none;border-color:#c9a82c}
+input::placeholder{color:#556}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+
+/* Buttons */
+.btn{padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600;transition:.2s}
+.btn-primary{background:#c9a82c;color:#0b3d6b}
+.btn-primary:hover{background:#e6c43a}
+.btn-secondary{background:#1e3a5f;color:#90caf9;border:1px solid #2c3e50}
+.btn-secondary:hover{background:#2c4f70}
+.btn-danger{background:#7b241c;color:#fca}
+.btn-danger:hover{background:#a93226}
+.btn-sm{padding:6px 12px;font-size:12px}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+
+/* Login page */
+#login-page{display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0d1b2a}
+.login-box{background:#1a2a3a;border:1px solid #2c3e50;border-radius:16px;padding:40px 36px;width:100%;max-width:400px}
+.login-title{text-align:center;margin-bottom:8px;font-size:22px;font-weight:700;color:#c9a82c}
+.login-sub{text-align:center;font-size:12px;color:#667;margin-bottom:28px}
+.tab-switch{display:flex;background:#0d1b2a;border-radius:8px;padding:3px;margin-bottom:20px}
+.tab-switch button{flex:1;padding:8px;border:none;background:none;color:#667;cursor:pointer;border-radius:6px;font-size:13px;transition:.2s}
+.tab-switch button.active{background:#c9a82c;color:#0b3d6b;font-weight:700}
+.error-msg{background:#3d1515;border:1px solid #7b241c;border-radius:8px;padding:10px 14px;font-size:13px;color:#fca;margin-bottom:14px;display:none}
+
+/* Match card */
+.match-card{background:#1a2a3a;border:1px solid #2c3e50;border-radius:12px;padding:16px;margin-bottom:12px;transition:.2s}
+.match-card:hover{border-color:#c9a82c33}
+.match-teams{display:flex;align-items:center;justify-content:center;gap:12px;font-size:17px;font-weight:700;margin-bottom:8px}
+.team-name{flex:1;text-align:center}
+.vs{color:#556;font-size:12px}
+.match-meta{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#667;margin-bottom:12px}
+.handicap-badge{background:#1e3a5f;border:1px solid #2980b9;color:#90caf9;padding:3px 10px;border-radius:20px;font-size:11px}
+.kickoff-time{color:#aaa}
+.match-status{padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600}
+.status-upcoming{background:#1a3020;color:#7ec88a;border:1px solid #2e7d42}
+.status-finished{background:#1a2030;color:#6a9fd8;border:1px solid #2c5f8a}
+.predict-row{display:flex;gap:8px;margin-top:8px}
+.predict-btn{flex:1;padding:9px;border:1px solid #2c3e50;background:#0d1b2a;color:#aaa;border-radius:8px;cursor:pointer;font-size:13px;transition:.2s;text-align:center}
+.predict-btn:hover{border-color:#c9a82c;color:#c9a82c}
+.predict-btn.selected{background:#c9a82c;color:#0b3d6b;border-color:#c9a82c;font-weight:700}
+.predict-btn.correct{background:#1a3020;color:#7ec88a;border-color:#2e7d42}
+.predict-btn.wrong{background:#2a1515;color:#e57373;border-color:#7b241c}
+.score-display{text-align:center;font-size:22px;font-weight:700;color:#c9a82c;margin:4px 0}
+
+/* Leaderboard */
+.lb-table{width:100%;border-collapse:collapse}
+.lb-table th{text-align:left;padding:10px 14px;font-size:12px;color:#90caf9;border-bottom:1px solid #2c3e50;text-transform:uppercase;letter-spacing:.5px}
+.lb-table td{padding:12px 14px;font-size:14px;border-bottom:1px solid #1a2a3a}
+.lb-table tr:hover td{background:#1e3040}
+.rank-badge{width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:13px}
+.rank-1{background:#c9a82c;color:#0b3d6b}
+.rank-2{background:#8fa3bf;color:#1a1a2e}
+.rank-3{background:#7a9e6a;color:#1a2a1a}
+.rank-other{background:#2c3e50;color:#90caf9}
+.points-col{font-size:18px;font-weight:700;color:#c9a82c}
+.me-row td{background:#1a2a1a!important}
+
+/* History */
+.hist-item{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #1e2e3e}
+.hist-match{font-size:13px;font-weight:600}
+.hist-meta{font-size:11px;color:#667;margin-top:2px}
+.pts-badge{padding:4px 12px;border-radius:20px;font-size:13px;font-weight:700}
+.pts-2{background:#c9a82c22;color:#c9a82c;border:1px solid #c9a82c44}
+.pts-15{background:#2980b922;color:#6ab0de;border:1px solid #2980b944}
+.pts-1{background:#27ae6022;color:#7ec88a;border:1px solid #27ae6044}
+.pts-05{background:#e67e2222;color:#e8a96a;border:1px solid #e67e2244}
+.pts-0{background:#c0392b22;color:#e57373;border:1px solid #c0392b44}
+.pts-pending{background:#2c3e5022;color:#667;border:1px solid #2c3e5044}
+
+/* Admin */
+.admin-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.result-form{display:flex;gap:8px;align-items:center}
+.result-form input{width:60px;text-align:center}
+
+/* Toast */
+#toast{position:fixed;bottom:24px;right:24px;background:#c9a82c;color:#0b3d6b;padding:12px 20px;border-radius:10px;font-weight:700;font-size:14px;display:none;z-index:999;box-shadow:0 4px 20px rgba(0,0,0,.4)}
+#toast.error{background:#7b241c;color:#fca}
+
+/* Misc */
+.empty-state{text-align:center;padding:40px;color:#556;font-size:14px}
+.section-title{font-size:20px;font-weight:700;color:#ffffff;margin-bottom:20px;display:flex;align-items:center;gap:10px}
+.badge-admin{background:#c9a82c22;color:#c9a82c;border:1px solid #c9a82c44;padding:2px 8px;border-radius:10px;font-size:11px}
+</style>
+</head>
+<body>
+
+<!-- Login Page -->
+<div id="login-page">
+  <div class="login-box">
+    <div class="login-title">🏆 ทายผลฟุตบอลโลก</div>
+    <div class="login-sub">World Cup 2026 Prediction Game</div>
+    <div class="tab-switch">
+      <button id="tab-login" class="active" onclick="switchAuthTab('login')">เข้าสู่ระบบ</button>
+      <button id="tab-register" onclick="switchAuthTab('register')">สมัครสมาชิก</button>
+    </div>
+    <div id="auth-error" class="error-msg"></div>
+
+    <!-- Login form -->
+    <div id="form-login">
+      <div class="form-group">
+        <label>ชื่อผู้ใช้</label>
+        <input id="login-username" type="text" placeholder="username" onkeydown="if(event.key==='Enter')doLogin()">
+      </div>
+      <div class="form-group">
+        <label>รหัสผ่าน</label>
+        <input id="login-password" type="password" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()">
+      </div>
+      <button class="btn btn-primary" style="width:100%;margin-top:4px" onclick="doLogin()">เข้าสู่ระบบ</button>
+    </div>
+
+    <!-- Register form -->
+    <div id="form-register" style="display:none">
+      <div class="form-group">
+        <label>ชื่อผู้ใช้ (สำหรับ Login)</label>
+        <input id="reg-username" type="text" placeholder="username">
+      </div>
+      <div class="form-group">
+        <label>ชื่อที่ใช้แสดง</label>
+        <input id="reg-display" type="text" placeholder="ชื่อในตารางคะแนน">
+      </div>
+      <div class="form-group">
+        <label>รหัสผ่าน</label>
+        <input id="reg-password" type="password" placeholder="••••••••">
+      </div>
+      <button class="btn btn-primary" style="width:100%;margin-top:4px" onclick="doRegister()">สมัครสมาชิก</button>
+    </div>
+  </div>
+</div>
+
+<!-- Main App -->
+<div id="app" style="display:none">
+  <nav>
+    <div class="nav-brand">🏆 ทายผลฟุตบอลโลก</div>
+    <div class="nav-tabs">
+      <button class="tab-btn active" onclick="showTab('matches')">นัดแข่งขัน</button>
+      <button class="tab-btn" onclick="showTab('leaderboard')">ตารางคะแนน</button>
+      <button class="tab-btn" onclick="showTab('history')">การทายของฉัน</button>
+      <button class="tab-btn" id="admin-tab" style="display:none" onclick="showTab('admin')">⚙ Admin</button>
+    </div>
+    <div class="nav-user">
+      <span id="nav-username"></span>
+      <button class="logout-btn" onclick="doLogout()">ออกจากระบบ</button>
+    </div>
+  </nav>
+
+  <main>
+    <!-- Matches -->
+    <section id="sec-matches" class="active">
+      <div class="section-title">⚽ นัดแข่งขัน</div>
+      <div id="matches-list"></div>
+    </section>
+
+    <!-- Leaderboard -->
+    <section id="sec-leaderboard">
+      <div class="section-title">🏆 ตารางคะแนน</div>
+      <div class="card">
+        <table class="lb-table">
+          <thead><tr>
+            <th style="width:50px">อันดับ</th>
+            <th>ผู้เล่น</th>
+            <th>นัดที่ทาย</th>
+            <th>ชนะเต็ม</th>
+            <th>คะแนนรวม</th>
+          </tr></thead>
+          <tbody id="lb-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- History -->
+    <section id="sec-history">
+      <div class="section-title">📋 ประวัติการทายของฉัน</div>
+      <div class="card">
+        <div id="history-list"></div>
+      </div>
+    </section>
+
+    <!-- Admin -->
+    <section id="sec-admin">
+      <div class="section-title">⚙ Admin Panel <span class="badge-admin">น้องปอนด์</span></div>
+      <div class="admin-grid">
+        <!-- Add match -->
+        <div class="card">
+          <div class="card-header">➕ เพิ่มนัดแข่งขัน</div>
+          <div class="row">
+            <div class="form-group">
+              <label>ทีมเหย้า</label>
+              <input id="m-home" type="text" placeholder="Brazil">
+            </div>
+            <div class="form-group">
+              <label>ทีมเยือน</label>
+              <input id="m-away" type="text" placeholder="Argentina">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>ทีมที่ต่อ (Handicap)</label>
+            <select id="m-hteam">
+              <option value="">-- เลือกทีม --</option>
+            </select>
+          </div>
+          <div class="row">
+            <div class="form-group">
+              <label>ราคา Handicap</label>
+              <input id="m-hval" type="number" step="0.25" placeholder="0.5">
+            </div>
+            <div class="form-group">
+              <label>วันเวลาเตะ</label>
+              <input id="m-kickoff" type="datetime-local">
+            </div>
+          </div>
+          <button class="btn btn-primary" onclick="addMatch()">เพิ่มนัด</button>
+        </div>
+
+        <!-- Set result -->
+        <div class="card">
+          <div class="card-header">✅ กรอกผลการแข่งขัน</div>
+          <div id="admin-matches-list"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const API = '';
+let token = localStorage.getItem('wc_token') || '';
+let currentUser = null;
+let allMatches = [];
+let myPreds = {};
+
+// ─── Auth ─────────────────────────────────────────────────
+function switchAuthTab(t) {
+  document.getElementById('form-login').style.display = t==='login'?'block':'none';
+  document.getElementById('form-register').style.display = t==='register'?'block':'none';
+  document.getElementById('tab-login').classList.toggle('active', t==='login');
+  document.getElementById('tab-register').classList.toggle('active', t==='register');
+  document.getElementById('auth-error').style.display = 'none';
+}
+
+async function doLogin() {
+  const u = document.getElementById('login-username').value.trim();
+  const p = document.getElementById('login-password').value;
+  if (!u || !p) return showAuthError('กรุณากรอกข้อมูลให้ครบ');
+  const fd = new FormData(); fd.append('username', u); fd.append('password', p);
+  try {
+    const r = await fetch(`${API}/token`, {method:'POST', body: fd});
+    const d = await r.json();
+    if (!r.ok) return showAuthError(d.detail || 'เข้าสู่ระบบไม่สำเร็จ');
+    token = d.access_token;
+    localStorage.setItem('wc_token', token);
+    currentUser = {display_name: d.display_name, is_admin: d.is_admin, username: u};
+    startApp();
+  } catch(e) { showAuthError('ไม่สามารถเชื่อมต่อ server ได้'); }
+}
+
+async function doRegister() {
+  const u = document.getElementById('reg-username').value.trim();
+  const dn = document.getElementById('reg-display').value.trim();
+  const p = document.getElementById('reg-password').value;
+  if (!u || !dn || !p) return showAuthError('กรุณากรอกข้อมูลให้ครบ');
+  try {
+    const r = await fetch(`${API}/register`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username:u, display_name:dn, password:p})});
+    const d = await r.json();
+    if (!r.ok) return showAuthError(d.detail || 'สมัครไม่สำเร็จ');
+    showAuthError(''); showToast('สมัครสำเร็จ! เข้าสู่ระบบได้เลย');
+    switchAuthTab('login');
+    document.getElementById('login-username').value = u;
+  } catch(e) { showAuthError('ไม่สามารถเชื่อมต่อ server ได้'); }
+}
+
+function showAuthError(msg) {
+  const el = document.getElementById('auth-error');
+  el.textContent = msg; el.style.display = msg ? 'block' : 'none';
+}
+
+function doLogout() {
+  token = ''; localStorage.removeItem('wc_token');
+  document.getElementById('login-page').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+}
+
+// ─── App Start ────────────────────────────────────────────
+async function startApp() {
+  document.getElementById('login-page').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  document.getElementById('nav-username').textContent = currentUser.display_name;
+  if (currentUser.is_admin) document.getElementById('admin-tab').style.display = 'block';
+  await Promise.all([loadMatches(), loadMyPreds()]);
+  renderMatches();
+}
+
+async function api(path, opts={}) {
+  const r = await fetch(`${API}${path}`, {
+    ...opts,
+    headers: {'Authorization': `Bearer ${token}`, 'Content-Type':'application/json', ...(opts.headers||{})}
+  });
+  if (r.status === 401) { doLogout(); return null; }
+  return r;
+}
+
+async function loadMatches() {
+  const r = await api('/matches');
+  if (!r) return;
+  allMatches = await r.json();
+}
+
+async function loadMyPreds() {
+  const r = await api('/predictions/mine');
+  if (!r) return;
+  const preds = await r.json();
+  myPreds = {};
+  preds.forEach(p => myPreds[p.match_id] = p);
+}
+
+// ─── Tab Navigation ───────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(`sec-${name}`).classList.add('active');
+  event.target.classList.add('active');
+  if (name === 'matches') { loadMatches().then(() => loadMyPreds().then(renderMatches)); }
+  if (name === 'leaderboard') loadLeaderboard();
+  if (name === 'history') loadHistory();
+  if (name === 'admin') loadAdminMatches();
+}
+
+// ─── Matches ──────────────────────────────────────────────
+function renderMatches() {
+  const el = document.getElementById('matches-list');
+  if (!allMatches.length) { el.innerHTML = '<div class="empty-state">ยังไม่มีนัดแข่งขัน</div>'; return; }
+  el.innerHTML = allMatches.map(m => {
+    const pred = myPreds[m.id];
+    const isFinished = m.status === 'finished';
+    const kickoff = new Date(m.kickoff_time);
+    const cutoff = new Date(kickoff - 30*60*1000);
+    const canPredict = !isFinished && new Date() < cutoff;
+    const hLabel = `${m.handicap_team} ต่อ ${m.handicap_value}`;
+
+    let homeClass = 'predict-btn', awayClass = 'predict-btn';
+    if (pred) {
+      if (!isFinished) {
+        if (pred.predicted_winner === m.team_home) homeClass += ' selected';
+        else awayClass += ' selected';
+      } else {
+        const isHomeCorrect = pred.points > 0;
+        const predictedHome = pred.predicted_winner === m.team_home;
+        if (predictedHome) homeClass += isHomeCorrect ? ' correct' : ' wrong';
+        else awayClass += isHomeCorrect ? ' wrong' : ' correct';
+      }
+    }
+
+    const ptsLabel = pred && isFinished ? `<span class="pts-badge ${ptsBadgeClass(pred.points)}">${pred.points} แต้ม</span>` : '';
+    const scoreHtml = isFinished ? `<div class="score-display">${m.score_home} - ${m.score_away}</div>` : '';
+
+    return `<div class="match-card">
+      <div class="match-teams">
+        <div class="team-name">${m.team_home}</div>
+        <div class="vs">VS</div>
+        <div class="team-name">${m.team_away}</div>
+      </div>
+      ${scoreHtml}
+      <div class="match-meta">
+        <span class="handicap-badge">${hLabel}</span>
+        <span class="kickoff-time">${fmtDate(kickoff)}</span>
+        <span class="match-status ${isFinished?'status-finished':'status-upcoming'}">${isFinished?'จบแล้ว':'กำลังจะเตะ'}</span>
+      </div>
+      ${ptsLabel}
+      ${canPredict ? `<div class="predict-row">
+        <button class="${homeClass}" onclick="predict(${m.id},'${m.team_home}',this)">${m.team_home}</button>
+        <button class="${awayClass}" onclick="predict(${m.id},'${m.team_away}',this)">${m.team_away}</button>
+      </div>` : (!pred && !isFinished ? `<div style="text-align:center;font-size:12px;color:#e57373;margin-top:8px">⏰ หมดเวลาทาย</div>` : '')}
+    </div>`;
+  }).join('');
+}
+
+async function predict(matchId, team, btn) {
+  const r = await api('/predictions', {method:'POST', body: JSON.stringify({match_id:matchId, predicted_winner:team})});
+  if (!r) return;
+  const d = await r.json();
+  if (!r.ok) { showToast(d.detail, true); return; }
+  showToast(`ทายไว้: ${team} ✓`);
+  myPreds[matchId] = {predicted_winner: team, match_id: matchId};
+  renderMatches();
+}
+
+// ─── Leaderboard ──────────────────────────────────────────
+async function loadLeaderboard() {
+  const r = await api('/leaderboard'); if (!r) return;
+  const rows = await r.json();
+  const body = document.getElementById('lb-body');
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="5" class="empty-state">ยังไม่มีข้อมูล</td></tr>'; return; }
+  body.innerHTML = rows.map((row, i) => {
+    const rank = i + 1;
+    const rankCls = rank <= 3 ? `rank-${rank}` : 'rank-other';
+    const isMe = row.username === currentUser.username;
+    return `<tr class="${isMe?'me-row':''}">
+      <td><span class="rank-badge ${rankCls}">${rank}</span></td>
+      <td>${row.display_name}${isMe?' <span style="color:#667;font-size:11px">(ฉัน)</span>':''}</td>
+      <td style="color:#aaa">${row.total_predictions}</td>
+      <td style="color:#7ec88a">${row.wins}</td>
+      <td class="points-col">${row.total_points}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ─── History ──────────────────────────────────────────────
+async function loadHistory() {
+  const r = await api('/predictions/mine'); if (!r) return;
+  const preds = await r.json();
+  const el = document.getElementById('history-list');
+  if (!preds.length) { el.innerHTML = '<div class="empty-state">ยังไม่มีการทาย</div>'; return; }
+  el.innerHTML = preds.map(p => {
+    const isFinished = p.status === 'finished';
+    const pts = isFinished ? p.points : null;
+    const ptsHtml = pts !== null
+      ? `<span class="pts-badge ${ptsBadgeClass(pts)}">${pts} แต้ม</span>`
+      : `<span class="pts-badge pts-pending">รอผล</span>`;
+    const score = isFinished ? ` (${p.score_home}-${p.score_away})` : '';
+    return `<div class="hist-item">
+      <div>
+        <div class="hist-match">${p.team_home} vs ${p.team_away}${score}</div>
+        <div class="hist-meta">ทาย: <strong style="color:#c9a82c">${p.predicted_winner}</strong> &nbsp;|&nbsp; ${fmtDate(new Date(p.kickoff_time))}</div>
+      </div>
+      ${ptsHtml}
+    </div>`;
+  }).join('');
+}
+
+// ─── Admin ────────────────────────────────────────────────
+async function addMatch() {
+  const home = document.getElementById('m-home').value.trim();
+  const away = document.getElementById('m-away').value.trim();
+  const hteam = document.getElementById('m-hteam').value;
+  const hval = parseFloat(document.getElementById('m-hval').value);
+  const kickoff = document.getElementById('m-kickoff').value;
+  if (!home||!away||!hteam||!hval||!kickoff) return showToast('กรอกข้อมูลให้ครบ', true);
+  const r = await api('/matches', {method:'POST', body: JSON.stringify({team_home:home, team_away:away, handicap_team:hteam, handicap_value:hval, kickoff_time:kickoff})});
+  if (!r||!r.ok) { showToast('เพิ่มนัดไม่สำเร็จ', true); return; }
+  showToast('เพิ่มนัดสำเร็จ ✓');
+  ['m-home','m-away','m-hval','m-kickoff'].forEach(id => document.getElementById(id).value = '');
+  await loadMatches();
+  loadAdminMatches();
+}
+
+// Update handicap team dropdown when teams are typed
+document.addEventListener('input', e => {
+  if (e.target.id === 'm-home' || e.target.id === 'm-away') {
+    const h = document.getElementById('m-home').value.trim();
+    const a = document.getElementById('m-away').value.trim();
+    const sel = document.getElementById('m-hteam');
+    sel.innerHTML = '<option value="">-- เลือกทีม --</option>';
+    if (h) sel.innerHTML += `<option value="${h}">${h}</option>`;
+    if (a) sel.innerHTML += `<option value="${a}">${a}</option>`;
+  }
+});
+
+async function loadAdminMatches() {
+  await loadMatches();
+  const el = document.getElementById('admin-matches-list');
+  const upcoming = allMatches.filter(m => m.status !== 'finished');
+  if (!upcoming.length) { el.innerHTML = '<div class="empty-state">ไม่มีนัดที่รอกรอกผล</div>'; return; }
+  el.innerHTML = upcoming.map(m =>
+    `<div style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid #1e2e3e">
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#90caf9">${m.team_home} vs ${m.team_away}</div>
+      <div style="font-size:11px;color:#667;margin-bottom:8px">${fmtDate(new Date(m.kickoff_time))}</div>
+      <div class="result-form">
+        <input id="sh-${m.id}" type="number" min="0" placeholder="${m.team_home.slice(0,3)}">
+        <span style="color:#667">-</span>
+        <input id="sa-${m.id}" type="number" min="0" placeholder="${m.team_away.slice(0,3)}">
+        <button class="btn btn-primary btn-sm" onclick="setResult(${m.id})">บันทึก</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteMatch(${m.id})">ลบ</button>
+      </div>
+    </div>`
+  ).join('');
+}
+
+async function setResult(matchId) {
+  const sh = parseInt(document.getElementById(`sh-${matchId}`).value);
+  const sa = parseInt(document.getElementById(`sa-${matchId}`).value);
+  if (isNaN(sh)||isNaN(sa)) return showToast('กรอกสกอร์ให้ครบ', true);
+  const r = await api('/admin/result', {method:'POST', body: JSON.stringify({match_id:matchId, score_home:sh, score_away:sa})});
+  const d = await r.json();
+  if (!r.ok) { showToast(d.detail, true); return; }
+  showToast(`บันทึกผลสำเร็จ คำนวณแล้ว ${d.updated} คน ✓`);
+  loadAdminMatches();
+}
+
+async function deleteMatch(matchId) {
+  if (!confirm('ลบนัดนี้และการทายทั้งหมดที่เกี่ยวข้อง?')) return;
+  const r = await api(`/matches/${matchId}`, {method:'DELETE'});
+  if (!r||!r.ok) return showToast('ลบไม่สำเร็จ', true);
+  showToast('ลบนัดแล้ว');
+  loadAdminMatches();
+}
+
+// ─── Helpers ──────────────────────────────────────────────
+function ptsBadgeClass(pts) {
+  if (pts === 2) return 'pts-2';
+  if (pts === 1.5) return 'pts-15';
+  if (pts === 1) return 'pts-1';
+  if (pts === 0.5) return 'pts-05';
+  return 'pts-0';
+}
+
+function fmtDate(d) {
+  return d.toLocaleString('th-TH', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'});
+}
+
+function showToast(msg, isError=false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = isError ? 'error' : '';
+  t.style.display = 'block';
+  setTimeout(() => t.style.display='none', 3000);
+}
+
+// ─── Init ─────────────────────────────────────────────────
+async function init() {
+  if (!token) return;
+  const r = await fetch(`${API}/me`, {headers:{'Authorization':`Bearer ${token}`}});
+  if (!r.ok) { localStorage.removeItem('wc_token'); token=''; return; }
+  currentUser = await r.json();
+  startApp();
+}
+init();
+</script>
+</body>
+</html>
