@@ -1,6 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
@@ -485,7 +484,4 @@ def leaderboard(user=Depends(get_current_user)):
     conn.close()
     return [dict(r) for r in rows]
 
-@app.get("/")
-def root(): return FileResponse("static/index.html")
-
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
