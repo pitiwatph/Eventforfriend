@@ -94,12 +94,21 @@
   const CUTOFF_MS = 30 * 60 * 1000;
   function matchState(m) {
     if (m.status === 'finished') return 'finished';
-    if (m.locked) return 'closed';                 // admin manually closed betting
     const ko = koDate(m.kickoff_time).getTime();
     const now = Date.now();
-    if (now >= ko) return 'live';
-    if (now >= ko - CUTOFF_MS) return 'locked';   // within 30-min cutoff
+    if (m.status === 'live') return 'live';         // backend marked in-progress
+    if (now >= ko) return 'live';                   // kicked off
+    if (m.locked) return 'closed';                  // admin manually closed betting
+    if (now >= ko - CUTOFF_MS) return 'locked';    // within 30-min cutoff
     return 'open';
+  }
+  // minutes elapsed since kickoff (negative before kickoff); for live phases
+  function elapsedMin(m) { return Math.floor((Date.now() - koDate(m.kickoff_time).getTime()) / 60000); }
+  function livePhase(m) {
+    const e = elapsedMin(m);
+    if (e < 55) return { label: '🟢 ครึ่งแรก', e };
+    if (e < 135) return { label: '🟡 ครึ่งหลัง', e };
+    return { label: '🔴 จบเกม', e };
   }
   const canBet = (st) => st === 'open';
 
@@ -333,9 +342,10 @@
     const st = matchState(m);
     const picked = S.myById[m.id];
     const finished = st === 'finished';
+    const hasScore = m.score_home != null && m.score_away != null;
     let mid;
-    if (finished) {
-      mid = `<div class="mid"><div class="score">${m.score_home}–${m.score_away}</div></div>`;
+    if (finished || (st === 'live' && hasScore)) {
+      mid = `<div class="mid"><div class="score">${m.score_home}–${m.score_away}</div>${st === 'live' ? '<div class="live-tag">🔴 LIVE</div>' : ''}</div>`;
     } else {
       mid = `<div class="mid"><div class="vstxt">VS</div></div>`;
     }
@@ -455,13 +465,14 @@
 
     $('histList').innerHTML = rows.length ? rows.map((p) => {
       const st = matchState(p);
-      const sc = p.status === 'finished' ? `<span class="sc">${p.score_home}–${p.score_away}</span>` : `<span class="faint">vs</span>`;
+      const hasScore = p.score_home != null && p.score_away != null;
+      const sc = hasScore ? `<span class="sc">${p.score_home}–${p.score_away}</span>` : `<span class="faint">vs</span>`;
       return `<div class="hrow">
         <div class="h-fixt">
           <div class="h-teams">${flag(p.team_home, p.team_home_flag)} ${esc(p.team_home)} ${sc} ${esc(p.team_away)} ${flag(p.team_away, p.team_away_flag)}</div>
           <div class="h-pick">ทาย: <b>${esc(p.predicted_winner)}</b> · ${fmtKO(p.kickoff_time)}</div>
         </div>
-        ${p.status === 'finished' ? ptsBadge(p.points) : chip(st)}
+        ${p.points != null ? ptsBadge(p.points) : chip(st)}
       </div>`;
     }).join('') : `<div class="empty"><div class="ico">📜</div><div class="msg">ยังไม่มีประวัติการทาย<br>You haven't predicted yet</div></div>`;
   }
@@ -612,6 +623,7 @@
     refreshHdcpSel();
     renderAdminUsers();
     renderAdminTeams();
+    renderAdminLive();
     const host = $('adminMatches');
     const sorted = [...S.matches].sort((a, b) => {
       const fa = a.status === 'finished', fb = b.status === 'finished';
@@ -630,7 +642,7 @@
           <span class="am-fixt">${stageBadge(m.stage)} ${flag(m.team_home, m.team_home_flag)} ${esc(m.team_home)} <span class="faint">vs</span> ${esc(m.team_away)} ${flag(m.team_away, m.team_away_flag)}</span>
           ${chip(st)}
         </div>
-        <div class="faint" style="font-size:11px;margin-bottom:9px">🗓 ${fmtKO(m.kickoff_time)} · ⚖️ ${esc(m.handicap_team)} ${m.handicap_value}</div>
+        <div class="faint" style="font-size:11px;margin-bottom:9px">🗓 ${fmtKO(m.kickoff_time)} · <span id="hdcp${m.id}">⚖️ ${esc(m.handicap_team)} ${m.handicap_value} <button class="lnk-edit" onclick="App.editHandicap(${m.id})" title="แก้ราคา handicap">✏️ แก้ราคา</button></span></div>
         <div class="am-form">
           <input class="in" id="rh${m.id}" type="number" min="0" placeholder="0" value="${fin ? m.score_home : ''}">
           <span class="dash">–</span>
@@ -817,6 +829,79 @@
     catch (e) { toast(e.detail || 'ทำรายการไม่สำเร็จ', true); }
   }
 
+  // ── admin: live in-progress scores (one batch call) ───────────────
+  function liveMatches() {
+    const now = Date.now();
+    return S.matches
+      .filter((m) => m.status !== 'finished' && now >= koDate(m.kickoff_time).getTime())
+      .sort((a, b) => koDate(a.kickoff_time) - koDate(b.kickoff_time));
+  }
+  function renderAdminLive() {
+    const host = $('liveScores');
+    if (!host) return;
+    const live = liveMatches();
+    if (!live.length) {
+      host.innerHTML = `<div class="faint" style="font-size:12px">ยังไม่มีแมตช์ที่กำลังแข่งขัน · no match in play</div>`;
+      return;
+    }
+    host.innerHTML = live.map((m) => {
+      const ph = livePhase(m);
+      const sh = m.score_home == null ? '' : m.score_home;
+      const sa = m.score_away == null ? '' : m.score_away;
+      return `<div class="admin-match">
+        <div class="am-top">
+          <span class="am-fixt">${flag(m.team_home, m.team_home_flag)} ${esc(m.team_home)} <span class="faint">vs</span> ${esc(m.team_away)} ${flag(m.team_away, m.team_away_flag)}</span>
+          <span class="chip chip-live">${ph.label} · ${ph.e}'</span>
+        </div>
+        <div class="am-form">
+          <input class="in" id="lh${m.id}" type="number" min="0" placeholder="0" value="${sh}">
+          <span class="dash">–</span>
+          <input class="in" id="la${m.id}" type="number" min="0" placeholder="0" value="${sa}">
+          <label class="fin-chk"><input type="checkbox" id="lf${m.id}" ${ph.e >= 135 ? 'checked' : ''}> จบเกม</label>
+        </div>
+      </div>`;
+    }).join('') +
+      `<button class="btn btn-gold btn-block" onclick="App.saveLiveScores()" style="margin-top:6px">💾 บันทึกสกอร์สดทั้งหมด · update all (1 call)</button>`;
+  }
+  async function saveLiveScores() {
+    const results = [];
+    for (const m of liveMatches()) {
+      const h = $('lh' + m.id).value, a = $('la' + m.id).value;
+      if (h === '' || a === '') continue;
+      results.push({ match_id: m.id, score_home: parseInt(h, 10), score_away: parseInt(a, 10), final: $('lf' + m.id).checked });
+    }
+    if (!results.length) { toast('ยังไม่มีสกอร์ให้บันทึก', true); return; }
+    try {
+      const r = await api('POST', '/admin/results_batch', { body: { results } });
+      toast(`อัปเดต ${r.matches || 0} แมตช์ · คิดคะแนนแล้ว ✓`);
+      await reloadAll();
+    } catch (e) { toast(e.detail || 'บันทึกสกอร์ไม่สำเร็จ', true); }
+  }
+
+  // ── admin: edit handicap line anytime ─────────────────────────────
+  function editHandicap(id) {
+    const m = S.matches.find((x) => x.id === id);
+    if (!m) return;
+    const box = $('hdcp' + id);
+    if (!box) return;
+    const opt = (t) => `<option value="${esc(t)}" ${m.handicap_team === t ? 'selected' : ''}>${esc(t)}</option>`;
+    box.innerHTML = `⚖️
+      <select class="in in-mini" id="eht${id}">${opt(m.team_home)}${opt(m.team_away)}</select>
+      <input class="in in-mini" id="ehv${id}" type="number" step="0.25" min="0" value="${m.handicap_value}" style="width:62px">
+      <button class="btn btn-gold btn-sm" onclick="App.saveHandicap(${id})">✓</button>
+      <button class="btn btn-ghost btn-sm" onclick="App.renderAdmin()">✕</button>`;
+  }
+  async function saveHandicap(id) {
+    const ht = $('eht' + id).value;
+    const hv = parseFloat($('ehv' + id).value);
+    if (isNaN(hv)) { toast('กรอกราคาให้ถูกต้อง', true); return; }
+    try {
+      const r = await api('PUT', '/matches/' + id, { body: { handicap_team: ht, handicap_value: hv } });
+      toast(r.recomputed ? `อัปเดตราคา · คิดคะแนนใหม่ ${r.recomputed} รายการ ✓` : 'อัปเดตราคาแล้ว ✓');
+      await reloadAll();
+    } catch (e) { toast(e.detail || 'อัปเดตราคาไม่สำเร็จ', true); }
+  }
+
   async function setResult(id) {
     const h = $('rh' + id).value, a = $('ra' + id).value;
     if (h === '' || a === '') { toast('กรอกสกอร์ให้ครบ', true); return; }
@@ -859,6 +944,7 @@
     doLogin, logout,
     go, predict, addMatch, setResult, delMatch, setHdcp, refreshHdcpSel,
     onTeamInput, onFlagInput, toggleLock,
+    saveLiveScores, editHandicap, saveHandicap, renderAdmin,
     createUser, delUser, editUser, saveTeam, delTeam, editTeam, updateTeamPrev,
     openProfile, closeModal, modalBg, saveProfile,
     runQuery, sqlSample, saveCell,

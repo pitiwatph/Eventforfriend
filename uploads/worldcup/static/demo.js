@@ -277,6 +277,30 @@
       if (m) m.locked = body.locked ? 1 : 0;
       return ok({ ok: true });
     }
+    if (method === 'POST' && path === '/admin/results_batch') {
+      let count = 0;
+      (body.results || []).forEach((it) => {
+        const m = matches.find((x) => x.id === it.match_id);
+        if (!m) return;
+        m.score_home = it.score_home; m.score_away = it.score_away;
+        m.status = it.final ? 'finished' : 'live'; m.locked = 1;
+        predictions.filter((p) => p.match_id === m.id).forEach((p) => { p.points = calcPoints(m, p.predicted_winner); });
+        count++;
+      });
+      return ok({ ok: true, matches: count, detail: [] });
+    }
+    if (method === 'PUT' && path.startsWith('/matches/')) {
+      const id = parseInt(path.split('/')[2], 10);
+      const m = matches.find((x) => x.id === id);
+      if (!m) return err(404, 'ไม่พบนัด');
+      ['handicap_team', 'handicap_value', 'kickoff_time', 'stage'].forEach((c) => {
+        if (body[c] != null) m[c] = c === 'handicap_value' ? Number(body[c]) : body[c];
+      });
+      let recomputed = 0;
+      if (m.score_home != null && m.score_away != null)
+        predictions.filter((p) => p.match_id === m.id).forEach((p) => { p.points = calcPoints(m, p.predicted_winner); recomputed++; });
+      return ok({ ok: true, recomputed });
+    }
     if (method === 'POST' && path === '/admin/query') return runQuery(body.sql);
     if (method === 'POST' && path === '/admin/update_cell') {
       const EDIT = {

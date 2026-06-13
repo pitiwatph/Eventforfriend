@@ -174,6 +174,12 @@ class MatchIn(BaseModel):
     handicap_value: float
     kickoff_time: str
 
+class MatchEditIn(BaseModel):
+    handicap_team: Optional[str] = None
+    handicap_value: Optional[float] = None
+    kickoff_time: Optional[str] = None
+    stage: Optional[str] = None
+
 class PredictionIn(BaseModel):
     match_id: int
     predicted_winner: str
@@ -182,6 +188,15 @@ class ResultIn(BaseModel):
     match_id: int
     score_home: int
     score_away: int
+
+class ScoreItem(BaseModel):
+    match_id: int
+    score_home: int
+    score_away: int
+    final: bool = False          # True = match over (finalize); False = live/in-progress
+
+class BatchResultIn(BaseModel):
+    results: List[ScoreItem]
 
 class LockIn(BaseModel):
     match_id: int
@@ -238,6 +253,24 @@ def ensure_default_predictions(conn, match: dict) -> int:
             "INSERT OR IGNORE INTO predictions (user_id, match_id, predicted_winner) VALUES (?,?,?)",
             (u["id"], match["id"], team))
     return len(missing)
+
+def apply_result(conn, match: dict, score_home: int, score_away: int, final: bool) -> int:
+    """Set a match's score and recompute every prediction's points immediately.
+    final=True finalizes the match (status 'finished'); final=False marks it
+    'live' so the score can still be updated again (e.g. half-time then
+    full-time). Betting is always closed once a score is entered. Recomputes
+    from scratch each call, so it is safe to run repeatedly. Returns the number
+    of predictions scored."""
+    status = "finished" if final else "live"
+    conn.execute("UPDATE matches SET score_home=?, score_away=?, status=?, locked=1 WHERE id=?",
+                 (score_home, score_away, status, match["id"]))
+    ensure_default_predictions(conn, match)  # make sure everyone has a row before scoring
+    scored = {**match, "score_home": score_home, "score_away": score_away}
+    preds = conn.execute("SELECT * FROM predictions WHERE match_id=?", (match["id"],)).fetchall()
+    for p in preds:
+        conn.execute("UPDATE predictions SET points=? WHERE id=?",
+                     (calc_points(scored, p["predicted_winner"]), p["id"]))
+    return len(preds)
 
 # ─── Endpoints ───────────────────────────────────────────────
 @app.post("/token")
@@ -376,6 +409,34 @@ def delete_match(match_id: int, user=Depends(require_admin)):
     conn.close()
     return {"ok": True}
 
+@app.put("/matches/{match_id}")
+def edit_match(match_id: int, body: MatchEditIn, user=Depends(require_admin)):
+    """Edit a match after creation — primarily the handicap line. If the match
+    already has a score, points are recomputed so the standings stay correct."""
+    conn = get_db()
+    match = conn.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+    if not match:
+        conn.close()
+        raise HTTPException(status_code=404, detail="ไม่พบนัด")
+    match = dict(match)
+    fields = {c: getattr(body, c) for c in ("handicap_team", "handicap_value", "kickoff_time", "stage")
+              if getattr(body, c) is not None}
+    if fields:
+        sets = ", ".join(f"{c}=?" for c in fields)
+        conn.execute(f"UPDATE matches SET {sets} WHERE id=?", (*fields.values(), match_id))
+    # recompute points when the handicap changed on an already-scored match
+    recomputed = 0
+    new_match = {**match, **fields}
+    if new_match["score_home"] is not None and new_match["score_away"] is not None:
+        preds = conn.execute("SELECT * FROM predictions WHERE match_id=?", (match_id,)).fetchall()
+        for p in preds:
+            conn.execute("UPDATE predictions SET points=? WHERE id=?",
+                         (calc_points(new_match, p["predicted_winner"]), p["id"]))
+        recomputed = len(preds)
+    conn.commit()
+    conn.close()
+    return {"ok": True, "recomputed": recomputed}
+
 # ─── Predictions ────────────────────────────────────────────
 @app.get("/predictions/mine")
 def my_predictions(user=Depends(get_current_user)):
@@ -422,18 +483,27 @@ def set_result(body: ResultIn, user=Depends(require_admin)):
     conn = get_db()
     match = conn.execute("SELECT * FROM matches WHERE id=?", (body.match_id,)).fetchone()
     if not match: raise HTTPException(status_code=404, detail="ไม่พบนัด")
-    match = dict(match)
-    conn.execute("UPDATE matches SET score_home=?, score_away=?, status='finished', locked=1 WHERE id=?",
-                 (body.score_home, body.score_away, body.match_id))
-    ensure_default_predictions(conn, match)  # fill in defaults so everyone is scored
-    preds = conn.execute("SELECT * FROM predictions WHERE match_id=?", (body.match_id,)).fetchall()
-    updated_match = {**match, "score_home": body.score_home, "score_away": body.score_away}
-    for p in preds:
-        pts = calc_points(updated_match, p["predicted_winner"])
-        conn.execute("UPDATE predictions SET points=? WHERE id=?", (pts, p["id"]))
+    n = apply_result(conn, dict(match), body.score_home, body.score_away, final=True)
     conn.commit()
     conn.close()
-    return {"ok": True, "updated": len(preds)}
+    return {"ok": True, "updated": n}
+
+@app.post("/admin/results_batch")
+def set_results_batch(body: BatchResultIn, user=Depends(require_admin)):
+    """Update the score of several in-progress matches in a single request and
+    recompute points immediately. Built for live updates (half-time / full-time)
+    while keeping API calls to a minimum. Pass final=True per match when it ends."""
+    conn = get_db()
+    detail = []
+    for item in body.results:
+        match = conn.execute("SELECT * FROM matches WHERE id=?", (item.match_id,)).fetchone()
+        if not match:
+            continue
+        n = apply_result(conn, dict(match), item.score_home, item.score_away, item.final)
+        detail.append({"match_id": item.match_id, "scored": n, "final": item.final})
+    conn.commit()
+    conn.close()
+    return {"ok": True, "matches": len(detail), "detail": detail}
 
 @app.post("/admin/lock")
 def lock_match(body: LockIn, user=Depends(require_admin)):
