@@ -863,6 +863,19 @@
     }).join('') +
       `<button class="btn btn-gold btn-block" onclick="App.saveLiveScores()" style="margin-top:6px">💾 บันทึกสกอร์สดทั้งหมด · update all (1 call)</button>`;
   }
+  async function fetchScores() {
+    try {
+      const r = await api('GET', '/admin/fetch_scores');
+      let filled = 0;
+      (r.matched || []).forEach((x) => {
+        const lh = $('lh' + x.match_id), la = $('la' + x.match_id), lf = $('lf' + x.match_id);
+        if (lh && la) { lh.value = x.score_home; la.value = x.score_away; if (lf) lf.checked = !!x.final; filled++; }
+      });
+      if (filled) toast(`ดึงสกอร์แล้ว · เติม ${filled} แมตช์ — ตรวจแล้วกดบันทึก ✓`);
+      else toast(`ดึงข้อมูลแล้ว (พบ ${r.fetched || 0} นัดในวันนี้) แต่ยังไม่มีแมตช์ที่กำลังแข่งตรงกับระบบ`, true);
+    } catch (e) { toast(e.detail || 'ดึงสกอร์ไม่สำเร็จ', true); }
+  }
+
   async function saveLiveScores() {
     const results = [];
     for (const m of liveMatches()) {
@@ -944,7 +957,7 @@
     doLogin, logout,
     go, predict, addMatch, setResult, delMatch, setHdcp, refreshHdcpSel,
     onTeamInput, onFlagInput, toggleLock,
-    saveLiveScores, editHandicap, saveHandicap, renderAdmin,
+    saveLiveScores, fetchScores, editHandicap, saveHandicap, renderAdmin,
     createUser, delUser, editUser, saveTeam, delTeam, editTeam, updateTeamPrev,
     openProfile, closeModal, modalBg, saveProfile,
     runQuery, sqlSample, saveCell,

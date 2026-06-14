@@ -277,6 +277,10 @@
       if (m) m.locked = body.locked ? 1 : 0;
       return ok({ ok: true });
     }
+    if (method === 'GET' && path === '/admin/fetch_scores') {
+      // demo has no external API — return an empty match set
+      return ok({ ok: true, date: new Date().toISOString().slice(0, 10), fetched: 0, matched: [] });
+    }
     if (method === 'POST' && path === '/admin/results_batch') {
       let count = 0;
       (body.results || []).forEach((it) => {

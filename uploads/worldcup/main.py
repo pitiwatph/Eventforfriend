@@ -7,7 +7,7 @@ from typing import Optional, List
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-import sqlite3, os, re
+import sqlite3, os, re, json, urllib.request, urllib.parse
 
 SECRET_KEY = "worldcup2026-secret-key-change-in-production"
 ALGORITHM = "HS256"
@@ -504,6 +504,105 @@ def set_results_batch(body: BatchResultIn, user=Depends(require_admin)):
     conn.commit()
     conn.close()
     return {"ok": True, "matches": len(detail), "detail": detail}
+
+# ─── API-Football: fetch live scores (admin presses a button) ───────
+# Free plan = 100 requests/day, data refreshes every ~15s. One button press =
+# one request that pulls the whole day's World Cup fixtures, so quota lasts.
+APIFOOTBALL_KEY    = os.environ.get("APIFOOTBALL_KEY", "")
+APIFOOTBALL_BASE   = os.environ.get("APIFOOTBALL_BASE", "https://v3.football.api-sports.io")
+APIFOOTBALL_LEAGUE = os.environ.get("APIFOOTBALL_LEAGUE", "1")      # 1 = FIFA World Cup
+APIFOOTBALL_SEASON = os.environ.get("APIFOOTBALL_SEASON", "2026")
+
+_LIVE_STATUS  = {"1H", "HT", "2H", "ET", "BT", "P", "SUSP", "INT", "LIVE"}
+_FINAL_STATUS = {"FT", "AET", "PEN"}
+# teams whose name differs between our registry and API-Football
+_TEAM_ALIAS_GROUPS = [
+    {"southkorea", "korearepublic"},
+    {"usa", "unitedstates", "unitedstatesofamerica"},
+    {"uae", "unitedarabemirates"},
+    {"czechrepublic", "czechia"},
+    {"turkey", "turkiye", "trkiye"},
+    {"ivorycoast", "cotedivoire"},
+]
+
+def _norm_team(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+def _team_eq(a: str, b: str) -> bool:
+    na, nb = _norm_team(a), _norm_team(b)
+    if na == nb:
+        return True
+    return any(na in g and nb in g for g in _TEAM_ALIAS_GROUPS)
+
+def parse_fixtures(payload: dict) -> list:
+    """Flatten an API-Football /fixtures response into simple score dicts."""
+    out = []
+    for f in payload.get("response", []):
+        try:
+            out.append({
+                "home": f["teams"]["home"]["name"],
+                "away": f["teams"]["away"]["name"],
+                "score_home": f["goals"]["home"],
+                "score_away": f["goals"]["away"],
+                "status": (f["fixture"]["status"]["short"] or "").upper(),
+                "elapsed": f["fixture"]["status"].get("elapsed"),
+            })
+        except (KeyError, TypeError):
+            continue
+    return out
+
+def match_fixtures(fixtures: list, db_rows: list) -> list:
+    """Pair API fixtures to our unfinished DB matches by team name (fixing
+    home/away orientation), keeping only those live or finished."""
+    out = []
+    for m in db_rows:
+        for a in fixtures:
+            if a["status"] not in _LIVE_STATUS and a["status"] not in _FINAL_STATUS:
+                continue
+            same = _team_eq(m["team_home"], a["home"]) and _team_eq(m["team_away"], a["away"])
+            swap = _team_eq(m["team_home"], a["away"]) and _team_eq(m["team_away"], a["home"])
+            if not (same or swap):
+                continue
+            sh = a["score_home"] if same else a["score_away"]
+            sa = a["score_away"] if same else a["score_home"]
+            out.append({
+                "match_id": m["id"],
+                "team_home": m["team_home"], "team_away": m["team_away"],
+                "score_home": sh if sh is not None else 0,
+                "score_away": sa if sa is not None else 0,
+                "status": a["status"],
+                "final": a["status"] in _FINAL_STATUS,
+            })
+            break
+    return out
+
+@app.get("/admin/fetch_scores")
+def fetch_scores(date: Optional[str] = None, user=Depends(require_admin)):
+    """Pull today's World Cup fixtures from API-Football and match them to our
+    fixtures. Returns suggested scores for the admin to review — it does NOT
+    write anything; the admin confirms with the batch-save button."""
+    if not APIFOOTBALL_KEY:
+        raise HTTPException(status_code=400, detail="ยังไม่ได้ตั้งค่า APIFOOTBALL_KEY บนเซิร์ฟเวอร์")
+    if not date:  # default to today's date in Bangkok (UTC+7)
+        date = (datetime.utcnow() + timedelta(hours=7)).strftime("%Y-%m-%d")
+    qs = urllib.parse.urlencode({"league": APIFOOTBALL_LEAGUE, "season": APIFOOTBALL_SEASON, "date": date})
+    headers = {"x-apisports-key": APIFOOTBALL_KEY}
+    if "rapidapi" in APIFOOTBALL_BASE:   # also support the RapidAPI proxy
+        headers = {"x-rapidapi-key": APIFOOTBALL_KEY,
+                   "x-rapidapi-host": APIFOOTBALL_BASE.split("//")[-1].split("/")[0]}
+    try:
+        req = urllib.request.Request(f"{APIFOOTBALL_BASE}/fixtures?{qs}", headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"เรียก API-Football ไม่สำเร็จ: {e}")
+    if payload.get("errors"):
+        raise HTTPException(status_code=502, detail=f"API-Football: {payload['errors']}")
+    fixtures = parse_fixtures(payload)
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute("SELECT * FROM matches WHERE status != 'finished'").fetchall()]
+    conn.close()
+    return {"ok": True, "date": date, "fetched": len(fixtures), "matched": match_fixtures(fixtures, rows)}
 
 @app.post("/admin/lock")
 def lock_match(body: LockIn, user=Depends(require_admin)):
