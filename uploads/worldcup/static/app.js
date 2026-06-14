@@ -882,8 +882,8 @@
     try {
       const r = await api('GET', '/admin/apifootball/fixtures');
       S.apiFixtures = r.fixtures || [];
-      if (!S.apiFixtures.length) toast('API ยังไม่มีรายการนัดของ World Cup 2026', true);
-      else toast(`โหลด ${S.apiFixtures.length} นัดจาก API แล้ว — เลือกผูกแต่ละนัดได้เลย ✓`);
+      if (!S.apiFixtures.length) toast(r.note || `ยังไม่พบรายการนัด (${r.provider || 'provider'})`, true);
+      else toast(`โหลด ${S.apiFixtures.length} นัดจาก ${r.provider || 'API'} แล้ว — เลือกผูกแต่ละนัดได้เลย ✓`);
       renderAdmin();
     } catch (e) { toast(e.detail || 'โหลดรายชื่อจาก API ไม่สำเร็จ', true); }
   }

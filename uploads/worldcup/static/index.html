@@ -180,9 +180,9 @@
       <!-- Live in-progress scores -->
       <div class="card">
         <div class="section-label" style="margin-top:0"><span class="dot"></span> 🔴 สกอร์สด · กำลังแข่งขัน</div>
-        <div class="faint" style="font-size:11px;margin:-4px 0 10px">นัดที่ <b>ผูกกับ API-Football</b> ไว้ ระบบจะดึงสกอร์ <b>อัตโนมัติทุก 15 นาที</b> ตั้งแต่เริ่มเตะไป 150 นาที และปิดผลให้เองเมื่อจบเกม — ไม่ต้องเปิดหน้าจอค้างไว้ (กรอกเองด้านล่างได้เสมอ)</div>
+        <div class="faint" style="font-size:11px;margin:-4px 0 10px">นัดที่ <b>ผูก event ไว้</b> ระบบจะดึงสกอร์ <b>อัตโนมัติทุก 15 นาที</b> ตั้งแต่เริ่มเตะไป 150 นาที และปิดผลให้เองเมื่อจบเกม — ไม่ต้องเปิดหน้าจอค้างไว้ (กรอกเองด้านล่างได้เสมอ)</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-          <button class="btn btn-ghost btn-sm" onclick="App.loadApiFixtures()">📋 โหลดรายชื่อนัดจาก API-Football</button>
+          <button class="btn btn-ghost btn-sm" onclick="App.loadApiFixtures()">📋 โหลดรายชื่อนัด (ESPN)</button>
           <button class="btn btn-ghost btn-sm" onclick="App.fetchScores()">🔄 ดึงสกอร์ตอนนี้</button>
         </div>
         <div id="liveScores"></div>
