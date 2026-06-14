@@ -392,9 +392,17 @@ input.in::placeholder{color:var(--faint)}
 #adminMatches{max-height:62vh;overflow-y:auto;padding-right:5px;margin-right:-3px}
 .admin-match .am-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px}
 .am-fixt{display:flex;align-items:center;gap:7px;font-family:var(--font-display);font-weight:600;font-size:13.5px}
-.am-form{display:flex;align-items:center;gap:7px}
+.am-form{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .am-form input.in{width:52px;text-align:center;padding:9px 4px;font-family:var(--font-display);font-weight:700;font-size:16px}
 .am-form .dash{color:var(--faint);font-family:var(--font-display);font-weight:700}
+/* full-time toggle in the live-score panel */
+.fin-chk{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--ink);cursor:pointer;user-select:none}
+.fin-chk input{width:auto;margin:0}
+/* inline "edit handicap" affordance on admin match cards */
+.lnk-edit{background:none;border:none;color:var(--gold,#c8a24a);font:inherit;font-size:11px;cursor:pointer;padding:0 2px;text-decoration:underline}
+.in-mini{width:auto;display:inline-block;padding:4px 6px;font-size:12px;vertical-align:middle}
+/* LIVE flag under the score on a match card */
+.live-tag{font-size:10px;font-weight:800;letter-spacing:.5px;color:var(--loss);margin-top:2px}
 
 /* segmented (admin handicap team selector built dynamically) */
 .seg{display:grid;gap:8px;grid-template-columns:1fr 1fr}
