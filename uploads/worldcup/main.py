@@ -510,12 +510,20 @@ def set_results_batch(body: BatchResultIn, user=Depends(require_admin)):
     conn.close()
     return {"ok": True, "matches": len(detail), "detail": detail}
 
-# ─── API-Football: World Cup 2026 only ──────────────────────────────
-# The admin maps each of our matches to a specific API-Football fixture id
-# (no name guessing). A background poller then auto-fetches the score every
-# POLL_INTERVAL while the match is in play, and finalizes it when the API says
-# the game is over. One poll cycle = one API request (fixtures pulled by id),
-# so the free-plan quota lasts comfortably.
+# ─── Live scores: World Cup 2026 (free provider, default = ESPN) ─────────────
+# The admin maps each of our matches to a specific provider event id (no name
+# guessing). A background poller then auto-fetches the score every POLL_INTERVAL
+# while a match is in play, and finalizes it when the provider says the game is
+# over. Default provider is ESPN's public scoreboard — free, no API key, and it
+# carries the FIFA World Cup. Set SCORE_PROVIDER=apifootball to use API-Football
+# instead (needs a paid plan for season 2026 + APIFOOTBALL_KEY).
+SCORE_PROVIDER = os.environ.get("SCORE_PROVIDER", "espn").lower()
+
+# ESPN (default, no key) — public site API. fifa.world = the World Cup finals.
+ESPN_BASE   = os.environ.get("ESPN_BASE", "https://site.api.espn.com/apis/site/v2/sports/soccer")
+ESPN_LEAGUE = os.environ.get("ESPN_LEAGUE", "fifa.world")
+
+# API-Football (optional alternative) — needs a paid plan for the 2026 season.
 APIFOOTBALL_KEY    = os.environ.get("APIFOOTBALL_KEY", "")
 APIFOOTBALL_BASE   = os.environ.get("APIFOOTBALL_BASE", "https://v3.football.api-sports.io")
 APIFOOTBALL_LEAGUE = os.environ.get("APIFOOTBALL_LEAGUE", "1")      # 1 = FIFA World Cup
@@ -523,15 +531,14 @@ APIFOOTBALL_SEASON = os.environ.get("APIFOOTBALL_SEASON", "2026")   # World Cup 
 
 POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "900"))  # 15 min
 POLL_WINDOW_MIN   = int(os.environ.get("POLL_WINDOW_MIN", "150"))    # poll for 150 min after kickoff
-MAX_IDS_PER_CALL  = 20                                               # API-Football cap for ?ids=
 
-_LIVE_STATUS  = {"1H", "HT", "2H", "ET", "BT", "P", "SUSP", "INT", "LIVE"}
-_FINAL_STATUS = {"FT", "AET", "PEN"}
+_LIVE_STATUS  = {"1H", "HT", "2H", "ET", "BT", "P", "SUSP", "INT", "LIVE"}   # API-Football
+_FINAL_STATUS = {"FT", "AET", "PEN"}                                          # API-Football
 # Used only to keep home/away orientation correct once the admin has chosen the
-# fixture — NOT to pick which fixture goes with which match (that is manual).
+# event — NOT to pick which event goes with which match (that is manual).
 _TEAM_ALIAS_GROUPS = [
     {"southkorea", "korearepublic"},
-    {"usa", "unitedstates", "unitedstatesofamerica"},
+    {"usa", "unitedstates", "unitedstatesofamerica", "usmnt"},
     {"uae", "unitedarabemirates"},
     {"czechrepublic", "czechia"},
     {"turkey", "turkiye", "trkiye"},
@@ -547,9 +554,46 @@ def _team_eq(a: str, b: str) -> bool:
         return True
     return any(na in g and nb in g for g in _TEAM_ALIAS_GROUPS)
 
+# A normalized fixture dict has: id, date, home, away, score_home, score_away,
+# live (bool), final (bool). Both providers parse into this shape.
+
+def _espn_get(date_yyyymmdd=None) -> dict:
+    url = f"{ESPN_BASE}/{ESPN_LEAGUE}/scoreboard"
+    if date_yyyymmdd:
+        url += "?dates=" + date_yyyymmdd
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (worldcup-app)"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+def _espn_parse(payload: dict) -> list:
+    out = []
+    for e in payload.get("events", []):
+        try:
+            comp = (e.get("competitions") or [])[0]
+            cs = comp.get("competitors") or []
+            home = next(c for c in cs if c.get("homeAway") == "home")
+            away = next(c for c in cs if c.get("homeAway") == "away")
+            stype = (e.get("status") or {}).get("type") or {}
+            state = (stype.get("state") or "").lower()        # pre | in | post
+            def _sc(c):
+                v = str(c.get("score", "")).strip()
+                return int(v) if v.lstrip("-").isdigit() else None
+            def _nm(c):
+                t = c.get("team") or {}
+                return t.get("displayName") or t.get("name") or t.get("shortDisplayName") or ""
+            out.append({
+                "id": int(e["id"]),
+                "date": (e.get("date") or "")[:16].replace("T", " "),
+                "home": _nm(home), "away": _nm(away),
+                "score_home": _sc(home), "score_away": _sc(away),
+                "live": state == "in",
+                "final": bool(stype.get("completed")) or state == "post",
+            })
+        except (KeyError, StopIteration, TypeError, ValueError):
+            continue
+    return out
+
 def _apifootball_get(params: dict) -> dict:
-    """One GET to API-Football /fixtures. Raises RuntimeError on transport or
-    API-level errors so callers can decide how to report them."""
     qs = urllib.parse.urlencode(params)
     headers = {"x-apisports-key": APIFOOTBALL_KEY}
     if "rapidapi" in APIFOOTBALL_BASE:   # also support the RapidAPI proxy
@@ -562,44 +606,51 @@ def _apifootball_get(params: dict) -> dict:
         raise RuntimeError(str(payload["errors"]))
     return payload
 
-def parse_fixtures(payload: dict) -> list:
-    """Flatten an API-Football /fixtures response into simple score dicts."""
+def _apifootball_parse(payload: dict) -> list:
     out = []
     for f in payload.get("response", []):
         try:
+            short = (f["fixture"]["status"]["short"] or "").upper()
             out.append({
                 "id": f["fixture"]["id"],
                 "date": (f["fixture"].get("date") or "")[:16].replace("T", " "),
-                "home": f["teams"]["home"]["name"],
-                "away": f["teams"]["away"]["name"],
-                "score_home": f["goals"]["home"],
-                "score_away": f["goals"]["away"],
-                "status": (f["fixture"]["status"]["short"] or "").upper(),
-                "elapsed": f["fixture"]["status"].get("elapsed"),
+                "home": f["teams"]["home"]["name"], "away": f["teams"]["away"]["name"],
+                "score_home": f["goals"]["home"], "score_away": f["goals"]["away"],
+                "live": short in _LIVE_STATUS, "final": short in _FINAL_STATUS,
             })
         except (KeyError, TypeError):
             continue
     return out
 
+def _provider_ready() -> bool:
+    if SCORE_PROVIDER == "apifootball":
+        return bool(APIFOOTBALL_KEY)
+    return True   # ESPN needs no key
+
+def _fixtures_for_dates(dates) -> list:
+    """Fetch normalized fixtures for a set of UTC dates (YYYYMMDD), deduped by id."""
+    out, seen = [], set()
+    for d in sorted({x for x in dates if x}):
+        if SCORE_PROVIDER == "apifootball":
+            iso = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+            fxs = _apifootball_parse(_apifootball_get(
+                {"league": APIFOOTBALL_LEAGUE, "season": APIFOOTBALL_SEASON, "date": iso}))
+        else:
+            fxs = _espn_parse(_espn_get(d))
+        for fx in fxs:
+            if fx["id"] not in seen:
+                seen.add(fx["id"]); out.append(fx)
+    return out
+
 def _oriented_scores(m: dict, fx: dict):
     """Return (home, away) goals aligned to OUR match's team order. The admin
-    chose the fixture; here we only flip orientation if the API clearly lists
-    the teams the other way round. Unknown goals count as 0."""
+    chose the event; here we only flip orientation if the provider lists the
+    teams the other way round. Unknown goals count as 0."""
     sh = 0 if fx["score_home"] is None else fx["score_home"]
     sa = 0 if fx["score_away"] is None else fx["score_away"]
     if _team_eq(m["team_away"], fx["home"]) and _team_eq(m["team_home"], fx["away"]):
         return sa, sh
     return sh, sa
-
-def _fetch_fixtures_by_ids(ids: list) -> dict:
-    """Pull the given fixture ids (batched ≤20/call) → {fixture_id: fixture}."""
-    found = {}
-    for i in range(0, len(ids), MAX_IDS_PER_CALL):
-        chunk = ids[i:i + MAX_IDS_PER_CALL]
-        payload = _apifootball_get({"ids": "-".join(str(x) for x in chunk)})
-        for fx in parse_fixtures(payload):
-            found[fx["id"]] = fx
-    return found
 
 def _ko_bkk(s: str):
     """Parse a stored kickoff_time as Bangkok-local naive datetime."""
@@ -611,6 +662,13 @@ def _ko_bkk(s: str):
             continue
     return None
 
+def _match_utc_date(m: dict):
+    """UTC calendar date (YYYYMMDD) of a match's kickoff — what providers key on."""
+    ko = _ko_bkk(m["kickoff_time"])
+    if ko is None:
+        return None
+    return (ko - timedelta(hours=7)).strftime("%Y%m%d")
+
 def _in_poll_window(m: dict) -> bool:
     """True from kickoff until POLL_WINDOW_MIN minutes after (Bangkok time)."""
     ko = _ko_bkk(m["kickoff_time"])
@@ -621,21 +679,31 @@ def _in_poll_window(m: dict) -> bool:
 
 @app.get("/admin/apifootball/fixtures")
 def apifootball_fixtures(user=Depends(require_admin)):
-    """List every World Cup 2026 fixture from API-Football (exact team names +
-    fixture ids) so the admin can manually map each of our matches to one."""
-    if not APIFOOTBALL_KEY:
-        raise HTTPException(status_code=400, detail="ยังไม่ได้ตั้งค่า APIFOOTBALL_KEY บนเซิร์ฟเวอร์")
+    """List World Cup fixtures from the score provider (exact team names + event
+    ids) so the admin can manually map each of our matches to one. Looks up the
+    dates of our unfinished matches, plus today."""
+    if not _provider_ready():
+        raise HTTPException(status_code=400, detail="provider=apifootball แต่ยังไม่ได้ตั้ง APIFOOTBALL_KEY")
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute("SELECT * FROM matches WHERE status != 'finished'").fetchall()]
+    conn.close()
+    dates = {_match_utc_date(m) for m in rows}
+    dates.add(datetime.utcnow().strftime("%Y%m%d"))
     try:
-        payload = _apifootball_get({"league": APIFOOTBALL_LEAGUE, "season": APIFOOTBALL_SEASON})
+        fx = _fixtures_for_dates(dates)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"เรียก API-Football ไม่สำเร็จ: {e}")
-    fx = parse_fixtures(payload)
+        raise HTTPException(status_code=502, detail=f"เรียกข้อมูลสกอร์ไม่สำเร็จ: {e}")
     fx.sort(key=lambda x: (x["date"], x["id"]))
-    return {"ok": True, "count": len(fx), "fixtures": fx}
+    fixtures = [{"fixture_id": f["id"], "date": f["date"], "home": f["home"], "away": f["away"],
+                 "score_home": f["score_home"], "score_away": f["score_away"],
+                 "live": f["live"], "final": f["final"]} for f in fx]
+    note = "" if fixtures else f"ยังไม่พบนัดในวันที่ {sorted(d for d in dates if d)} (provider={SCORE_PROVIDER})"
+    return {"ok": True, "provider": SCORE_PROVIDER, "count": len(fixtures),
+            "dates": sorted(d for d in dates if d), "fixtures": fixtures, "note": note}
 
 @app.post("/admin/apifootball/map")
 def apifootball_map(body: MapIn, user=Depends(require_admin)):
-    """Bind (or clear) the API-Football fixture id for one of our matches."""
+    """Bind (or clear) the provider event id for one of our matches."""
     conn = get_db()
     cur = conn.execute("UPDATE matches SET apifootball_fixture_id=? WHERE id=?",
                        (body.fixture_id, body.match_id))
@@ -649,8 +717,8 @@ def apifootball_map(body: MapIn, user=Depends(require_admin)):
 def fetch_scores(user=Depends(require_admin)):
     """Manual 'fetch now' — pull scores for every mapped, unfinished match and
     return suggestions for the admin to review. Does NOT write anything."""
-    if not APIFOOTBALL_KEY:
-        raise HTTPException(status_code=400, detail="ยังไม่ได้ตั้งค่า APIFOOTBALL_KEY บนเซิร์ฟเวอร์")
+    if not _provider_ready():
+        raise HTTPException(status_code=400, detail="provider=apifootball แต่ยังไม่ได้ตั้ง APIFOOTBALL_KEY")
     conn = get_db()
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM matches WHERE status != 'finished' AND apifootball_fixture_id IS NOT NULL"
@@ -658,27 +726,27 @@ def fetch_scores(user=Depends(require_admin)):
     conn.close()
     if not rows:
         return {"ok": True, "fetched": 0, "matched": [],
-                "note": "ยังไม่มีนัดที่ผูกกับ fixture ของ API — กดผูกก่อน"}
+                "note": "ยังไม่มีนัดที่ผูกกับ event — กดผูกก่อน"}
+    dates = {_match_utc_date(m) for m in rows} or {datetime.utcnow().strftime("%Y%m%d")}
     try:
-        found = _fetch_fixtures_by_ids([m["apifootball_fixture_id"] for m in rows])
+        found = {fx["id"]: fx for fx in _fixtures_for_dates(dates)}
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"เรียก API-Football ไม่สำเร็จ: {e}")
+        raise HTTPException(status_code=502, detail=f"เรียกข้อมูลสกอร์ไม่สำเร็จ: {e}")
     matched = []
     for m in rows:
         fx = found.get(m["apifootball_fixture_id"])
-        if not fx or (fx["status"] not in _LIVE_STATUS and fx["status"] not in _FINAL_STATUS):
+        if not fx or not (fx["live"] or fx["final"]):
             continue
         sh, sa = _oriented_scores(m, fx)
-        matched.append({"match_id": m["id"], "score_home": sh, "score_away": sa,
-                        "status": fx["status"], "final": fx["status"] in _FINAL_STATUS})
+        matched.append({"match_id": m["id"], "score_home": sh, "score_away": sa, "final": fx["final"]})
     return {"ok": True, "fetched": len(found), "matched": matched}
 
 # ─── Background poller: auto-fetch + auto-finalize while matches are live ────
 def _poll_once() -> int:
     """One auto cycle: for every mapped, unfinished match inside its poll
-    window, pull the live score and write it (finalizing on FT/AET/PEN).
+    window, pull the live score and write it (finalizing when the game is over).
     Returns the number of matches updated."""
-    if not APIFOOTBALL_KEY:
+    if not _provider_ready():
         return 0
     conn = get_db()
     try:
@@ -688,14 +756,14 @@ def _poll_once() -> int:
         active = [m for m in rows if _in_poll_window(m)]
         if not active:
             return 0
-        found = _fetch_fixtures_by_ids([m["apifootball_fixture_id"] for m in active])
+        found = {fx["id"]: fx for fx in _fixtures_for_dates({_match_utc_date(m) for m in active})}
         updated = 0
         for m in active:
             fx = found.get(m["apifootball_fixture_id"])
-            if not fx or (fx["status"] not in _LIVE_STATUS and fx["status"] not in _FINAL_STATUS):
+            if not fx or not (fx["live"] or fx["final"]):
                 continue
             sh, sa = _oriented_scores(m, fx)
-            apply_result(conn, m, sh, sa, fx["status"] in _FINAL_STATUS)
+            apply_result(conn, m, sh, sa, fx["final"])
             updated += 1
         conn.commit()
         return updated
@@ -721,7 +789,7 @@ def _start_poller():
         return
     _poller_started = True
     threading.Thread(target=_poller_loop, daemon=True).start()
-    print(f"[poller] started · every {POLL_INTERVAL_SEC}s · window {POLL_WINDOW_MIN}min", flush=True)
+    print(f"[poller] started · provider={SCORE_PROVIDER} · every {POLL_INTERVAL_SEC}s · window {POLL_WINDOW_MIN}min", flush=True)
 
 @app.post("/admin/lock")
 def lock_match(body: LockIn, user=Depends(require_admin)):
