@@ -21,6 +21,7 @@
     hdcpTeam: null,      // admin handicap selection
     resultsDirty: true,  // lazy-render the (potentially large) results view
     defaulted: {},       // match_id -> true when pick came from the system default
+    apiFixtures: [],     // admin: API-Football WC2026 fixtures, for manual mapping
   };
   const LS = 'wc26_token';
 
@@ -643,6 +644,7 @@
           ${chip(st)}
         </div>
         <div class="faint" style="font-size:11px;margin-bottom:9px">🗓 ${fmtKO(m.kickoff_time)} · <span id="hdcp${m.id}">⚖️ ${esc(m.handicap_team)} ${m.handicap_value} <button class="lnk-edit" onclick="App.editHandicap(${m.id})" title="แก้ราคา handicap">✏️ แก้ราคา</button></span></div>
+        ${fin ? '' : `<div class="faint" style="font-size:11px;margin:-4px 0 9px">${apiMapHtml(m)}</div>`}
         <div class="am-form">
           <input class="in" id="rh${m.id}" type="number" min="0" placeholder="0" value="${fin ? m.score_home : ''}">
           <span class="dash">–</span>
@@ -863,6 +865,38 @@
     }).join('') +
       `<button class="btn btn-gold btn-block" onclick="App.saveLiveScores()" style="margin-top:6px">💾 บันทึกสกอร์สดทั้งหมด · update all (1 call)</button>`;
   }
+  // ── admin: manual mapping to API-Football fixtures (WC2026) ───────
+  function apiMapHtml(m) {
+    const mapped = m.apifootball_fixture_id;
+    if (!S.apiFixtures.length) {
+      return mapped
+        ? `🔗 ผูกกับ API แล้ว (fixture #${mapped}) · <button class="lnk-edit" onclick="App.loadApiFixtures()">โหลดรายชื่อเพื่อเปลี่ยน</button>`
+        : `🔗 <button class="lnk-edit" onclick="App.loadApiFixtures()">โหลดรายชื่อนัดจาก API-Football เพื่อผูก</button>`;
+    }
+    const opt = (v, label, sel) => `<option value="${v}" ${sel ? 'selected' : ''}>${esc(label)}</option>`;
+    const opts = [opt('', '— ยังไม่ผูก —', !mapped)].concat(
+      S.apiFixtures.map((f) => opt(f.fixture_id, `${f.date} · ${f.home} vs ${f.away}`, f.fixture_id === mapped)));
+    return `🔗 ผูก API: <select class="in in-mini" style="max-width:240px" onchange="App.mapFixture(${m.id}, this.value)">${opts.join('')}</select>`;
+  }
+  async function loadApiFixtures() {
+    try {
+      const r = await api('GET', '/admin/apifootball/fixtures');
+      S.apiFixtures = r.fixtures || [];
+      if (!S.apiFixtures.length) toast('API ยังไม่มีรายการนัดของ World Cup 2026', true);
+      else toast(`โหลด ${S.apiFixtures.length} นัดจาก API แล้ว — เลือกผูกแต่ละนัดได้เลย ✓`);
+      renderAdmin();
+    } catch (e) { toast(e.detail || 'โหลดรายชื่อจาก API ไม่สำเร็จ', true); }
+  }
+  async function mapFixture(matchId, val) {
+    const fid = val === '' ? null : parseInt(val, 10);
+    try {
+      await api('POST', '/admin/apifootball/map', { body: { match_id: matchId, fixture_id: fid } });
+      const m = S.matches.find((x) => x.id === matchId);
+      if (m) m.apifootball_fixture_id = fid;
+      toast(fid ? 'ผูก fixture แล้ว ✓ ระบบจะดึงสกอร์อัตโนมัติเมื่อเริ่มแข่ง' : 'ยกเลิกการผูกแล้ว');
+    } catch (e) { toast(e.detail || 'ผูก fixture ไม่สำเร็จ', true); renderAdmin(); }
+  }
+
   async function fetchScores() {
     try {
       const r = await api('GET', '/admin/fetch_scores');
@@ -872,7 +906,8 @@
         if (lh && la) { lh.value = x.score_home; la.value = x.score_away; if (lf) lf.checked = !!x.final; filled++; }
       });
       if (filled) toast(`ดึงสกอร์แล้ว · เติม ${filled} แมตช์ — ตรวจแล้วกดบันทึก ✓`);
-      else toast(`ดึงข้อมูลแล้ว (พบ ${r.fetched || 0} นัดในวันนี้) แต่ยังไม่มีแมตช์ที่กำลังแข่งตรงกับระบบ`, true);
+      else if (r.note) toast(r.note, true);
+      else toast(`ดึงข้อมูลแล้ว แต่ยังไม่มีนัดที่ผูกไว้กำลังแข่งอยู่`, true);
     } catch (e) { toast(e.detail || 'ดึงสกอร์ไม่สำเร็จ', true); }
   }
 
@@ -957,7 +992,7 @@
     doLogin, logout,
     go, predict, addMatch, setResult, delMatch, setHdcp, refreshHdcpSel,
     onTeamInput, onFlagInput, toggleLock,
-    saveLiveScores, fetchScores, editHandicap, saveHandicap, renderAdmin,
+    saveLiveScores, fetchScores, loadApiFixtures, mapFixture, editHandicap, saveHandicap, renderAdmin,
     createUser, delUser, editUser, saveTeam, delTeam, editTeam, updateTeamPrev,
     openProfile, closeModal, modalBg, saveProfile,
     runQuery, sqlSample, saveCell,
