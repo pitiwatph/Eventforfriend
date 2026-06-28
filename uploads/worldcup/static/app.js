@@ -243,29 +243,36 @@
   // ════════════════════════════════════════════════════════════════
   //  VIEW: PREDICT
   // ════════════════════════════════════════════════════════════════
+  function statsFor(board) {
+    const list = board || [];
+    const row = list.find((r) => r.display_name === S.me.display_name);
+    const rank = list.findIndex((r) => r.display_name === S.me.display_name) + 1;
+    return { rank: rank || '–', pts: row ? row.total_points : 0, wins: row ? row.wins : 0 };
+  }
   function myStats() {
-    const row = S.leaderboard.find((r) => r.display_name === S.me.display_name);
-    let rank = S.leaderboard.findIndex((r) => r.display_name === S.me.display_name) + 1;
-    const pts = row ? row.total_points : 0;
-    const wins = row ? row.wins : 0;
+    const overall = statsFor(S.lb.overall);
+    const knockout = statsFor(S.lb.knockout);
     // streak: consecutive most-recent finished predictions scoring >= 1.5
     const finished = S.mine.filter((p) => p.status === 'finished' && p.points != null)
       .sort((a, b) => (b.kickoff_time || '').localeCompare(a.kickoff_time || ''));
     let streak = 0;
     for (const p of finished) { if (p.points >= 1.5) streak++; else break; }
-    return { rank: rank || '–', pts, wins, streak, total: S.mine.length };
+    // spread overall for any legacy callers expecting flat {rank,pts,wins}
+    return { ...overall, overall, knockout, streak, total: S.mine.length };
   }
 
   function renderMe() {
     const s = myStats();
+    const fmt = (n) => (+n).toLocaleString(undefined, { maximumFractionDigits: 1 });
     $('meHero').innerHTML = `
       <div class="mecard">
-        <div class="rankpill"><span class="hash">#${s.rank}</span><span class="lbl">Rank</span></div>
+        <div class="rankpill"><span class="hash">#${s.knockout.rank}</span><span class="lbl">Rank · น็อคเอาท์</span></div>
         <div class="hello">สวัสดี · welcome back</div>
         <div class="name">${esc(S.me.display_name)} 👋</div>
-        <div class="me-stats" style="grid-template-columns:repeat(2,1fr)">
-          <div class="stat"><div class="v">${(+s.pts).toLocaleString(undefined, { maximumFractionDigits: 1 })}<small> pt</small></div><div class="k">แต้มรวม · Points</div></div>
-          <div class="stat"><div class="v">${s.wins}</div><div class="k">ชนะเต็ม · Wins</div></div>
+        <div class="me-stats">
+          <div class="stat stat-hot"><div class="v">${fmt(s.knockout.pts)}<small> pt</small></div><div class="k">🔥 น็อคเอาท์ · Knockout</div></div>
+          <div class="stat"><div class="v">${fmt(s.overall.pts)}<small> pt</small></div><div class="k">🏆 รวมทั้งหมด · Overall</div></div>
+          <div class="stat"><div class="v">${s.knockout.wins}</div><div class="k">ชนะเต็ม · Wins</div></div>
         </div>
       </div>`;
   }
