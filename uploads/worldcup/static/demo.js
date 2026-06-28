@@ -49,6 +49,7 @@
   // ── seed users / matches / predictions ─────────────────────────────
   let uid = 1, mid = 1, pid = 1;
   const users = [], matches = [], predictions = [];
+  let displaySettings = { home_stats: ['knockout', 'overall', 'wins'], lb_tabs: ['overall', 'group', 'knockout'] };
 
   function addUser(username, display, isAdmin) {
     users.push({ id: uid++, username, display_name: display, password: username === 'admin' ? 'admin1234' : '1234', is_admin: isAdmin ? 1 : 0, knockout_eligible: 1 });
@@ -199,6 +200,7 @@
       return ok({ ok: true });
     }
     if (method === 'GET' && path === '/stages') return ok(STAGES);
+    if (method === 'GET' && path === '/settings') return ok(displaySettings);
     if (method === 'GET' && path === '/teams') return ok([...teams].sort((a, b) => a.name.localeCompare(b.name)));
     if (method === 'GET' && path === '/matches') return ok([...matches].sort((a, b) => a.kickoff_time.localeCompare(b.kickoff_time)).map(publicMatch));
     if (method === 'GET' && path === '/predictions/mine') return ok(joinMine(me));
@@ -219,6 +221,15 @@
 
     // ── admin only below ──
     if (!me.is_admin) return err(403, 'Admin only');
+
+    if (method === 'PUT' && path === '/admin/settings') {
+      const HOME_KEYS = ['knockout', 'overall', 'wins'], LB_KEYS = ['overall', 'group', 'knockout'];
+      const home_stats = (body.home_stats || []).filter((k) => HOME_KEYS.includes(k));
+      const lb_tabs = (body.lb_tabs || []).filter((k) => LB_KEYS.includes(k));
+      if (!lb_tabs.length) return err(400, 'ต้องเปิดอย่างน้อย 1 แท็บตารางคะแนน');
+      displaySettings = { home_stats, lb_tabs };
+      return ok({ ok: true, ...displaySettings });
+    }
 
     if (method === 'GET' && path === '/admin/users')
       return ok(users.map((u) => ({ id: u.id, username: u.username, display_name: u.display_name, is_admin: u.is_admin, knockout_eligible: !!u.knockout_eligible })).sort((a, b) => b.is_admin - a.is_admin || a.id - b.id));

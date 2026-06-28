@@ -24,7 +24,12 @@
     resultsDirty: true,  // lazy-render the (potentially large) results view
     defaulted: {},       // match_id -> true when pick came from the system default
     apiFixtures: [],     // admin: API-Football WC2026 fixtures, for manual mapping
+    settings: { home_stats: ['knockout', 'overall', 'wins'], lb_tabs: ['overall', 'group', 'knockout'] },
   };
+  const HOME_STAT_LABELS = { knockout: '🔥 น็อคเอาท์ · Knockout', overall: '🏆 รวมทั้งหมด · Overall', wins: 'ชนะเต็ม · Wins' };
+  const LB_TAB_LABELS = { overall: '🏆 รวมทั้งหมด', group: '🏟️ รอบแบ่งกลุ่ม', knockout: '🔥 น็อคเอาท์' };
+  const HOME_STAT_KEYS_ORDER = ['knockout', 'overall', 'wins'];
+  const LB_TAB_KEYS_ORDER = ['overall', 'group', 'knockout'];
   const LS = 'wc26_token';
 
   // ── api: try network, fall back to demo ──────────────────────────
@@ -208,7 +213,7 @@
   }
 
   async function reloadAll() {
-    const [matches, mine, lbOverall, lbGroup, lbKnockout, teams, stages] = await Promise.all([
+    const [matches, mine, lbOverall, lbGroup, lbKnockout, teams, stages, settings] = await Promise.all([
       api('GET', '/matches'),
       api('GET', '/predictions/mine'),
       api('GET', '/leaderboard?phase=overall'),
@@ -216,6 +221,7 @@
       api('GET', '/leaderboard?phase=knockout'),
       api('GET', '/teams').catch(() => []),
       api('GET', '/stages').catch(() => ['Group Stage', 'Round of 32', 'Round of 16', 'Quarter-finals', 'Semi-finals', 'Third-Place Play-off', 'The Final']),
+      api('GET', '/settings').catch(() => null),
     ]);
     S.matches = matches;
     S.mine = mine;
@@ -223,6 +229,8 @@
     S.leaderboard = lbOverall;
     S.teams = teams || [];
     S.stages = stages || [];
+    if (settings) S.settings = settings;
+    if (!S.settings.lb_tabs.includes(S.lbPhase)) S.lbPhase = S.settings.lb_tabs[0];
     if (window.setTeamFlags) window.setTeamFlags(S.teams);
     S.myById = {};
     mine.forEach((p) => (S.myById[p.match_id] = p.predicted_winner));
@@ -261,19 +269,23 @@
     return { ...overall, overall, knockout, streak, total: S.mine.length };
   }
 
+  function homeStatBox(key, s, fmt) {
+    if (key === 'knockout') return `<div class="stat stat-hot"><div class="v">${fmt(s.knockout.pts)}<small> pt</small></div><div class="k">${HOME_STAT_LABELS.knockout}</div></div>`;
+    if (key === 'overall') return `<div class="stat"><div class="v">${fmt(s.overall.pts)}<small> pt</small></div><div class="k">${HOME_STAT_LABELS.overall}</div></div>`;
+    if (key === 'wins') return `<div class="stat"><div class="v">${s.knockout.wins}</div><div class="k">${HOME_STAT_LABELS.wins}</div></div>`;
+    return '';
+  }
   function renderMe() {
     const s = myStats();
     const fmt = (n) => (+n).toLocaleString(undefined, { maximumFractionDigits: 1 });
+    const keys = S.settings.home_stats.length ? S.settings.home_stats : ['knockout'];
+    const boxes = keys.map((k) => homeStatBox(k, s, fmt)).join('');
     $('meHero').innerHTML = `
       <div class="mecard">
         <div class="rankpill"><span class="hash">#${s.knockout.rank}</span><span class="lbl">Rank · น็อคเอาท์</span></div>
         <div class="hello">สวัสดี · welcome back</div>
         <div class="name">${esc(S.me.display_name)} 👋</div>
-        <div class="me-stats">
-          <div class="stat stat-hot"><div class="v">${fmt(s.knockout.pts)}<small> pt</small></div><div class="k">🔥 น็อคเอาท์ · Knockout</div></div>
-          <div class="stat"><div class="v">${fmt(s.overall.pts)}<small> pt</small></div><div class="k">🏆 รวมทั้งหมด · Overall</div></div>
-          <div class="stat"><div class="v">${s.knockout.wins}</div><div class="k">ชนะเต็ม · Wins</div></div>
-        </div>
+        <div class="me-stats" style="grid-template-columns:repeat(${keys.length},1fr)">${boxes}</div>
       </div>`;
   }
 
@@ -431,12 +443,22 @@
   // ════════════════════════════════════════════════════════════════
   function setLbPhase(phase) {
     S.lbPhase = phase;
-    document.querySelectorAll('#lbPhaseTabs .lb-phase-tab').forEach((b) =>
-      b.classList.toggle('active', b.dataset.phase === phase));
+    renderLbTabs();
     renderLeaderboard();
   }
 
+  function renderLbTabs() {
+    const host = $('lbPhaseTabs');
+    if (!host) return;
+    const tabs = S.settings.lb_tabs.length ? S.settings.lb_tabs : ['overall'];
+    if (!tabs.includes(S.lbPhase)) S.lbPhase = tabs[0];
+    host.innerHTML = tabs.map((t) =>
+      `<button class="lb-phase-tab ${t === S.lbPhase ? 'active' : ''}" data-phase="${t}" onclick="App.setLbPhase('${t}')">${LB_TAB_LABELS[t] || t}</button>`
+    ).join('');
+  }
+
   function renderLeaderboard() {
+    renderLbTabs();
     const lb = S.lb[S.lbPhase] || [];
     const podium = $('podium'), list = $('lbList');
     if (!lb.length) {
@@ -650,9 +672,42 @@
     } catch (e) { toast(e.detail || 'เพิ่มนัดไม่สำเร็จ', true); }
   }
 
+  // ── admin: display settings (home stat boxes / leaderboard tabs) ──
+  function renderAdminDisplaySettings() {
+    const host = $('displaySettings');
+    if (!host) return;
+    const chk = (group, key, label, checked) =>
+      `<label class="fin-chk" style="margin:4px 10px 4px 0">
+        <input type="checkbox" data-grp="${group}" value="${key}" ${checked ? 'checked' : ''}> ${label}
+      </label>`;
+    host.innerHTML = `
+      <div style="margin-bottom:10px">
+        <div class="faint" style="font-size:11.5px;margin-bottom:5px">กล่องคะแนนหน้าทายผล · Home stat boxes</div>
+        ${HOME_STAT_KEYS_ORDER.map((k) => chk('home_stats', k, HOME_STAT_LABELS[k], S.settings.home_stats.includes(k))).join('')}
+      </div>
+      <div style="margin-bottom:10px">
+        <div class="faint" style="font-size:11.5px;margin-bottom:5px">แท็บตารางคะแนน · Leaderboard tabs</div>
+        ${LB_TAB_KEYS_ORDER.map((k) => chk('lb_tabs', k, LB_TAB_LABELS[k], S.settings.lb_tabs.includes(k))).join('')}
+      </div>
+      <button class="btn btn-gold btn-sm" onclick="App.saveDisplaySettings()">💾 บันทึก</button>`;
+  }
+  async function saveDisplaySettings() {
+    const host = $('displaySettings');
+    const val = (grp) => Array.from(host.querySelectorAll(`input[data-grp="${grp}"]:checked`)).map((i) => i.value);
+    const lb_tabs = val('lb_tabs');
+    if (!lb_tabs.length) { toast('ต้องเลือกอย่างน้อย 1 แท็บตารางคะแนน', true); return; }
+    try {
+      const r = await api('PUT', '/admin/settings', { body: { home_stats: val('home_stats'), lb_tabs } });
+      S.settings = { home_stats: r.home_stats, lb_tabs: r.lb_tabs };
+      toast('บันทึกการแสดงผลแล้ว ✓');
+      renderMe(); renderLbTabs(); renderLeaderboard();
+    } catch (e) { toast(e.detail || 'บันทึกไม่สำเร็จ', true); }
+  }
+
   function renderAdmin() {
     populateTeamDatalist();
     refreshHdcpSel();
+    renderAdminDisplaySettings();
     renderAdminUsers();
     renderAdminTeams();
     renderAdminLive();
@@ -1034,6 +1089,7 @@
     go, predict, addMatch, setResult, delMatch, setHdcp, refreshHdcpSel,
     onTeamInput, onFlagInput, toggleLock,
     saveLiveScores, fetchScores, loadApiFixtures, mapFixture, editHandicap, saveHandicap, renderAdmin,
+    saveDisplaySettings,
     createUser, delUser, editUser, saveTeam, delTeam, editTeam, updateTeamPrev,
     openProfile, closeModal, modalBg, saveProfile, togglePfKnockout,
     runQuery, sqlSample, saveCell,
