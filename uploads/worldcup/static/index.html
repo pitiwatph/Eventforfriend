@@ -83,9 +83,9 @@
         <div class="sub">อันดับจากแต้มทายผล · ranked by points</div>
       </div>
       <div class="lb-phase-tabs" id="lbPhaseTabs">
-        <button class="lb-phase-tab active" data-phase="overall" onclick="App.setLbPhase('overall')">🏆 รวมทั้งหมด</button>
+        <button class="lb-phase-tab" data-phase="overall" onclick="App.setLbPhase('overall')">🏆 รวมทั้งหมด</button>
         <button class="lb-phase-tab" data-phase="group" onclick="App.setLbPhase('group')">🏟️ รอบแบ่งกลุ่ม</button>
-        <button class="lb-phase-tab" data-phase="knockout" onclick="App.setLbPhase('knockout')">🔥 น็อคเอาท์</button>
+        <button class="lb-phase-tab active" data-phase="knockout" onclick="App.setLbPhase('knockout')">🔥 น็อคเอาท์</button>
       </div>
       <div id="podium"></div>
       <div id="lbList" class="lb-list"></div>
@@ -291,6 +291,13 @@
       <div class="form-row" id="pfUserRow" style="display:none">
         <label class="fld">Username</label>
         <input class="in" id="pfUser" autocomplete="off" disabled>
+      </div>
+      <div class="form-row" id="pfKoRow" style="display:none">
+        <label class="fld">สิทธิ์ทายรอบน็อคเอาท์ <span class="en">Knockout access</span></label>
+        <div class="tw-toggle" onclick="App.togglePfKnockout()" style="cursor:pointer">
+          <span id="pfKoLabel">อนุญาตให้ทาย</span>
+          <div class="sw" id="pfKoSw"></div>
+        </div>
       </div>
       <div class="form-row">
         <label class="fld">รหัสผ่านใหม่ <span class="en">New password</span></label>
