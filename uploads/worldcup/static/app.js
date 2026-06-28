@@ -344,10 +344,13 @@
     return `<span class="chip chip-open">✏️ เปิดทาย · Open</span>`;
   }
 
+  function isKnockout(m) { return m.stage !== 'Group Stage'; }
+
   function matchCard(m) {
     const st = matchState(m);
     const picked = S.myById[m.id];
     const finished = st === 'finished';
+    const blocked = !finished && isKnockout(m) && S.me && !S.me.is_admin && S.me.knockout_eligible === false;
     const hasScore = m.score_home != null && m.score_away != null;
     let mid;
     if (finished || (st === 'live' && hasScore)) {
@@ -362,6 +365,8 @@
         ${mp ? `<span class="predicted-tag">ทายไว้: <b>${flag(mp.predicted_winner, mp.predicted_winner === m.team_home ? m.team_home_flag : m.team_away_flag)} ${esc(mp.predicted_winner)}</b></span>` : `<span class="faint" style="font-size:12px">ไม่ได้ทายนัดนี้</span>`}
         ${mp ? ptsBadge(mp.points) : ''}
       </div>`;
+    } else if (blocked) {
+      foot = `<div class="locked-note">🚫 คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้ · not eligible for the knockout round</div>`;
     } else if (st === 'locked' || st === 'live' || st === 'closed') {
       const note = st === 'closed' ? '🔒 แอดมินปิดรับการทายแล้ว · closed by admin' : '🔒 ปิดรับการทายแล้ว · predictions closed';
       foot = predictBtns(m, st) + `<div class="locked-note">${note}${picked ? ` (คุณทาย ${esc(picked)})` : ''}</div>`;
@@ -689,6 +694,7 @@
             <div class="lb-nm">${esc(u.display_name)}${u.is_admin ? '<span class="you-tag" style="background:var(--gold)">ADMIN</span>' : ''}</div>
             <div class="lb-meta">@${esc(u.username)}</div>
           </div>
+          ${u.is_admin ? '' : `<button class="btn btn-sm ${u.knockout_eligible ? 'btn-gold' : 'btn-ghost'}" onclick="App.toggleKnockout(${u.id}, ${u.knockout_eligible ? 0 : 1})" title="${u.knockout_eligible ? 'ตัดสิทธิ์ทายรอบน็อคเอาท์' : 'ให้สิทธิ์ทายรอบน็อคเอาท์'}">${u.knockout_eligible ? '🥊 น็อคเอาท์ ✓' : '🥊 น็อคเอาท์ ✗'}</button>`}
           <button class="btn btn-ghost btn-sm u-edit" onclick="App.editUser(${u.id}, ${JSON.stringify(u.display_name).replace(/"/g, '&quot;')}, ${JSON.stringify(u.username).replace(/"/g, '&quot;')})">แก้</button>
           ${u.is_admin ? '' : `<button class="btn btn-danger btn-sm" onclick="App.delUser(${u.id}, ${JSON.stringify(u.display_name).replace(/"/g, '&quot;')})" title="ลบผู้ใช้">🗑</button>`}
         </div>`).join('');
@@ -848,6 +854,14 @@
   async function toggleLock(id, locked) {
     try { await api('POST', '/admin/lock', { body: { match_id: id, locked } }); toast(locked ? 'ปิดรับการทายแล้ว 🔒' : 'เปิดรับการทายอีกครั้ง 🔓'); await reloadAll(); }
     catch (e) { toast(e.detail || 'ทำรายการไม่สำเร็จ', true); }
+  }
+
+  async function toggleKnockout(id, eligible) {
+    try {
+      await api('PUT', '/admin/users/' + id, { body: { knockout_eligible: !!eligible } });
+      toast(eligible ? 'ให้สิทธิ์ทายรอบน็อคเอาท์แล้ว 🥊' : 'ตัดสิทธิ์ทายรอบน็อคเอาท์แล้ว');
+      renderAdminUsers();
+    } catch (e) { toast(e.detail || 'ทำรายการไม่สำเร็จ', true); }
   }
 
   // ── admin: live in-progress scores (one batch call) ───────────────
@@ -1010,7 +1024,7 @@
   window.App = {
     doLogin, logout,
     go, predict, addMatch, setResult, delMatch, setHdcp, refreshHdcpSel,
-    onTeamInput, onFlagInput, toggleLock,
+    onTeamInput, onFlagInput, toggleLock, toggleKnockout,
     saveLiveScores, fetchScores, loadApiFixtures, mapFixture, editHandicap, saveHandicap, renderAdmin,
     createUser, delUser, editUser, saveTeam, delTeam, editTeam, updateTeamPrev,
     openProfile, closeModal, modalBg, saveProfile,

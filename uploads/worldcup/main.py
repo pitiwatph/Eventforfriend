@@ -107,6 +107,11 @@ def init_db():
                      ("apifootball_fixture_id", "INTEGER")]:
         if col not in cols:
             c.execute(f"ALTER TABLE matches ADD COLUMN {col} {ddl}")
+    user_cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
+    if "knockout_eligible" not in user_cols:
+        # existing players keep playing knockout by default; admin opts specific
+        # users out (left the group) or in (joined fresh) per round from here.
+        c.execute("ALTER TABLE users ADD COLUMN knockout_eligible INTEGER DEFAULT 1")
     # seed teams registry
     if not c.execute("SELECT id FROM teams LIMIT 1").fetchone():
         for name, iso in TEAM_SEED:
@@ -146,6 +151,7 @@ class UserIn(BaseModel):
     username: str
     display_name: str
     password: str
+    knockout_eligible: bool = True
 
 class ProfileIn(BaseModel):
     display_name: Optional[str] = None
@@ -154,6 +160,7 @@ class ProfileIn(BaseModel):
 class UserEditIn(BaseModel):
     display_name: Optional[str] = None
     password: Optional[str] = None
+    knockout_eligible: Optional[bool] = None
 
 class CellIn(BaseModel):
     table: str
@@ -247,10 +254,13 @@ def ensure_default_predictions(conn, match: dict) -> int:
     """Persist the system default pick for every non-admin user who hasn't
     submitted a prediction for this match. This is the safety net that keeps
     the displayed default in sync with real backend data (and scoring).
+    Knockout matches (anything past Group Stage) only get a default for users
+    flagged knockout_eligible, since the roster can shrink/grow between rounds.
     Returns the number of default rows created."""
     team = default_pick(match)
+    eligibility = "" if match.get("stage") == "Group Stage" else "AND knockout_eligible=1 "
     missing = conn.execute(
-        "SELECT id FROM users WHERE is_admin=0 "
+        f"SELECT id FROM users WHERE is_admin=0 {eligibility}"
         "AND id NOT IN (SELECT user_id FROM predictions WHERE match_id=?)",
         (match["id"],)).fetchall()
     for u in missing:
@@ -292,7 +302,8 @@ def login(form: OAuth2PasswordRequestForm = Depends()):
 @app.get("/me")
 def me(user=Depends(get_current_user)):
     return {"id": user["id"], "username": user["username"],
-            "display_name": user["display_name"], "is_admin": user["is_admin"]}
+            "display_name": user["display_name"], "is_admin": user["is_admin"],
+            "knockout_eligible": bool(user["knockout_eligible"])}
 
 @app.post("/me/update")
 def update_me(body: ProfileIn, user=Depends(get_current_user)):
@@ -313,7 +324,9 @@ def stages(user=Depends(get_current_user)):
 @app.get("/admin/users")
 def list_users(user=Depends(require_admin)):
     conn = get_db()
-    rows = conn.execute("SELECT id, username, display_name, is_admin FROM users ORDER BY is_admin DESC, id").fetchall()
+    rows = conn.execute(
+        "SELECT id, username, display_name, is_admin, knockout_eligible FROM users ORDER BY is_admin DESC, id"
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -321,8 +334,10 @@ def list_users(user=Depends(require_admin)):
 def create_user(body: UserIn, user=Depends(require_admin)):
     conn = get_db()
     try:
-        conn.execute("INSERT INTO users (username, display_name, password_hash) VALUES (?,?,?)",
-                     (body.username.strip(), body.display_name.strip(), hash_password(body.password)))
+        conn.execute(
+            "INSERT INTO users (username, display_name, password_hash, knockout_eligible) VALUES (?,?,?,?)",
+            (body.username.strip(), body.display_name.strip(), hash_password(body.password),
+             1 if body.knockout_eligible else 0))
         conn.commit()
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="ชื่อผู้ใช้นี้มีอยู่แล้ว")
@@ -350,6 +365,9 @@ def edit_user(user_id: int, body: UserEditIn, user=Depends(require_admin)):
         conn.execute("UPDATE users SET display_name=? WHERE id=?", (body.display_name.strip(), user_id))
     if body.password:
         conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(body.password), user_id))
+    if body.knockout_eligible is not None:
+        conn.execute("UPDATE users SET knockout_eligible=? WHERE id=?",
+                     (1 if body.knockout_eligible else 0, user_id))
     conn.commit()
     conn.close()
     return {"ok": True}
@@ -464,6 +482,9 @@ def submit_prediction(body: PredictionIn, user=Depends(get_current_user)):
         conn.close()
         raise HTTPException(status_code=404, detail="ไม่พบนัดนี้")
     match = dict(match)
+    if match.get("stage") != "Group Stage" and not user["knockout_eligible"]:
+        conn.close()
+        raise HTTPException(status_code=403, detail="คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้")
     if match.get("locked"):
         conn.close()
         raise HTTPException(status_code=400, detail="แอดมินปิดรับการทายนัดนี้แล้ว")
@@ -830,7 +851,7 @@ def admin_query(body: QueryIn, user=Depends(require_admin)):
 
 # editable result cells — whitelisted tables/columns only, by row id
 _EDITABLE = {
-    "users": {"display_name", "username", "is_admin"},
+    "users": {"display_name", "username", "is_admin", "knockout_eligible"},
     "teams": {"name", "flag"},
     "matches": {"team_home", "team_away", "team_home_flag", "team_away_flag", "stage",
                 "handicap_team", "handicap_value", "kickoff_time", "score_home", "score_away", "status", "locked"},
@@ -861,6 +882,9 @@ _PHASE_COND = {
 @app.get("/leaderboard")
 def leaderboard(phase: str = "overall", user=Depends(get_current_user)):
     cond = _PHASE_COND.get(phase, _PHASE_COND["overall"])
+    # knockout board only lists players still flagged in for this round —
+    # someone who dropped out shouldn't clutter it with a static 0
+    roster_filter = "AND u.knockout_eligible=1" if phase == "knockout" else ""
     conn = get_db()
     rows = conn.execute(f"""
         SELECT u.display_name, u.username,
@@ -871,7 +895,7 @@ def leaderboard(phase: str = "overall", user=Depends(get_current_user)):
         FROM users u
         LEFT JOIN predictions p ON u.id=p.user_id
         LEFT JOIN matches m ON p.match_id=m.id
-        WHERE u.is_admin=0
+        WHERE u.is_admin=0 {roster_filter}
         GROUP BY u.id ORDER BY total_points DESC, wins DESC
     """).fetchall()
     conn.close()

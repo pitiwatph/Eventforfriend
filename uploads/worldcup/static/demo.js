@@ -51,7 +51,7 @@
   const users = [], matches = [], predictions = [];
 
   function addUser(username, display, isAdmin) {
-    users.push({ id: uid++, username, display_name: display, password: username === 'admin' ? 'admin1234' : '1234', is_admin: isAdmin ? 1 : 0 });
+    users.push({ id: uid++, username, display_name: display, password: username === 'admin' ? 'admin1234' : '1234', is_admin: isAdmin ? 1 : 0, knockout_eligible: 1 });
   }
   addUser('admin', 'น้องปอนด์ (Admin)', true);
   addUser('guest', 'คุณเอ๋ (You)', false);
@@ -136,7 +136,7 @@
       if (phase === 'knockout') return m.stage !== 'Group Stage';
       return true; // overall
     };
-    return users.filter((u) => !u.is_admin).map((u) => {
+    return users.filter((u) => !u.is_admin && (phase !== 'knockout' || u.knockout_eligible)).map((u) => {
       const mine = predictions.filter((p) => p.user_id === u.id && inPhase(matches.find((x) => x.id === p.match_id)));
       let total = 0, wins = 0, finished = 0;
       mine.forEach((p) => {
@@ -156,7 +156,7 @@
     if (!low.startsWith('select') && !low.startsWith('with')) return err(400, 'อนุญาตเฉพาะคำสั่ง SELECT เท่านั้น');
     if (/\b(insert|update|delete|drop|alter|create|replace|pragma)\b/.test(low)) return err(400, 'พบคำสั่งที่ไม่อนุญาต (read-only)');
     const tables = {
-      users: () => users.map((u) => ({ id: u.id, username: u.username, display_name: u.display_name, is_admin: u.is_admin })),
+      users: () => users.map((u) => ({ id: u.id, username: u.username, display_name: u.display_name, is_admin: u.is_admin, knockout_eligible: u.knockout_eligible })),
       teams: () => teams.map((t) => ({ id: t.id, name: t.name, flag: t.flag })),
       matches: () => matches.map((m) => ({ id: m.id, team_home: m.team_home, team_away: m.team_away, stage: m.stage, handicap_team: m.handicap_team, handicap_value: m.handicap_value, kickoff_time: m.kickoff_time, score_home: m.score_home, score_away: m.score_away, status: m.status, locked: m.locked })),
       predictions: () => predictions.map((p) => ({ id: p.id, user_id: p.user_id, match_id: p.match_id, predicted_winner: p.predicted_winner, points: p.points })),
@@ -192,7 +192,7 @@
     if (!me) return err(401, 'Invalid token');
 
     if (method === 'GET' && path === '/me')
-      return ok({ id: me.id, username: me.username, display_name: me.display_name, is_admin: me.is_admin });
+      return ok({ id: me.id, username: me.username, display_name: me.display_name, is_admin: me.is_admin, knockout_eligible: !!me.knockout_eligible });
     if (method === 'POST' && path === '/me/update') {
       if (body.display_name != null && body.display_name.trim()) me.display_name = body.display_name.trim();
       if (body.password) me.password = body.password;
@@ -207,6 +207,7 @@
     if (method === 'POST' && path === '/predictions') {
       const m = matches.find((x) => x.id === body.match_id);
       if (!m) return err(404, 'ไม่พบนัดนี้');
+      if (m.stage !== 'Group Stage' && !me.knockout_eligible) return err(403, 'คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้');
       if (m.locked) return err(400, 'แอดมินปิดรับการทายนัดนี้แล้ว');
       if (m.status !== 'upcoming') return err(400, 'นัดนี้เริ่มไปแล้ว');
       if (Date.now() >= new Date(m.kickoff_time).getTime() - 30 * MIN) return err(400, 'หมดเวลาทาย (ต้องส่งก่อน Kickoff 30 นาที)');
@@ -220,10 +221,10 @@
     if (!me.is_admin) return err(403, 'Admin only');
 
     if (method === 'GET' && path === '/admin/users')
-      return ok(users.map((u) => ({ id: u.id, username: u.username, display_name: u.display_name, is_admin: u.is_admin })).sort((a, b) => b.is_admin - a.is_admin || a.id - b.id));
+      return ok(users.map((u) => ({ id: u.id, username: u.username, display_name: u.display_name, is_admin: u.is_admin, knockout_eligible: !!u.knockout_eligible })).sort((a, b) => b.is_admin - a.is_admin || a.id - b.id));
     if (method === 'POST' && path === '/admin/users') {
       if (users.some((x) => x.username === (body.username || '').trim())) return err(400, 'ชื่อผู้ใช้นี้มีอยู่แล้ว');
-      users.push({ id: uid++, username: (body.username || '').trim(), display_name: (body.display_name || '').trim(), password: body.password, is_admin: 0 });
+      users.push({ id: uid++, username: (body.username || '').trim(), display_name: (body.display_name || '').trim(), password: body.password, is_admin: 0, knockout_eligible: body.knockout_eligible === false ? 0 : 1 });
       return ok({ ok: true });
     }
     if (method === 'DELETE' && path.startsWith('/admin/users/')) {
@@ -241,6 +242,7 @@
       if (!u) return err(404, 'ไม่พบผู้ใช้');
       if (body.display_name != null && body.display_name.trim()) u.display_name = body.display_name.trim();
       if (body.password) u.password = body.password;
+      if (body.knockout_eligible != null) u.knockout_eligible = body.knockout_eligible ? 1 : 0;
       return ok({ ok: true });
     }
 
@@ -317,7 +319,7 @@
     if (method === 'POST' && path === '/admin/query') return runQuery(body.sql);
     if (method === 'POST' && path === '/admin/update_cell') {
       const EDIT = {
-        users: ['display_name', 'username', 'is_admin'],
+        users: ['display_name', 'username', 'is_admin', 'knockout_eligible'],
         teams: ['name', 'flag'],
         matches: ['team_home', 'team_away', 'team_home_flag', 'team_away_flag', 'stage', 'handicap_team', 'handicap_value', 'kickoff_time', 'score_home', 'score_away', 'status', 'locked'],
         predictions: ['predicted_winner', 'points'],
@@ -328,7 +330,7 @@
       const row = arrs[body.table].find((x) => x.id === body.id);
       if (!row) return err(404, 'ไม่พบแถว');
       let v = body.value;
-      if (['handicap_value', 'score_home', 'score_away', 'points', 'locked', 'is_admin'].includes(body.column))
+      if (['handicap_value', 'score_home', 'score_away', 'points', 'locked', 'is_admin', 'knockout_eligible'].includes(body.column))
         v = v === '' || v == null ? null : Number(v);
       row[body.column] = v;
       return ok({ ok: true });
