@@ -901,4 +901,17 @@ def leaderboard(phase: str = "overall", user=Depends(get_current_user)):
     conn.close()
     return [dict(r) for r in rows]
 
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+class NoCacheStaticFiles(StaticFiles):
+    """Serve static assets with revalidation so deploys show up immediately.
+
+    Without this, browsers happily keep serving an old app.js/styles.css for
+    hours after a deploy. `no-cache` doesn't disable caching — it forces the
+    browser to revalidate against the server (cheap 304 when unchanged), so a
+    freshly-deployed file is always picked up on the next load.
+    """
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
+
+app.mount("/", NoCacheStaticFiles(directory="static", html=True), name="static")
