@@ -24,6 +24,13 @@ DB_PATH = os.path.join(os.environ.get("DATA_DIR", "."), "worldcup.db")
 STAGES = ["Group Stage", "Round of 32", "Round of 16", "Quarter-finals",
           "Semi-finals", "Third-Place Play-off", "The Final"]
 
+# Admin-configurable: which stat boxes show on the home hero, and which tabs
+# show on the leaderboard. Stored as one JSON row in `settings` so it survives
+# restarts without a schema change.
+HOME_STAT_KEYS = ["knockout", "overall", "wins"]
+LB_TAB_KEYS = ["overall", "group", "knockout"]
+DEFAULT_DISPLAY_SETTINGS = {"home_stats": list(HOME_STAT_KEYS), "lb_tabs": list(LB_TAB_KEYS)}
+
 # Pre-defined teams (name -> flag image URL via flagcdn). Admin can edit/add later.
 TEAM_SEED = [
     ("Argentina", "ar"), ("Brazil", "br"), ("France", "fr"), ("England", "gb-eng"),
@@ -95,6 +102,10 @@ def init_db():
             FOREIGN KEY(user_id) REFERENCES users(id),
             FOREIGN KEY(match_id) REFERENCES matches(id)
         );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
     """)
     # seed admin
     if not c.execute("SELECT id FROM users WHERE username='admin'").fetchone():
@@ -116,6 +127,10 @@ def init_db():
     if not c.execute("SELECT id FROM teams LIMIT 1").fetchone():
         for name, iso in TEAM_SEED:
             c.execute("INSERT OR IGNORE INTO teams (name, flag) VALUES (?,?)", (name, flag_url(iso)))
+    # seed display settings (which home stat boxes / leaderboard tabs admin shows)
+    if not c.execute("SELECT key FROM settings WHERE key='display'").fetchone():
+        c.execute("INSERT INTO settings (key, value) VALUES ('display', ?)",
+                  (json.dumps(DEFAULT_DISPLAY_SETTINGS),))
     conn.commit()
     conn.close()
 
@@ -216,6 +231,10 @@ class QueryIn(BaseModel):
 class MapIn(BaseModel):
     match_id: int
     fixture_id: Optional[int] = None   # None / null = clear the mapping
+
+class DisplaySettingsIn(BaseModel):
+    home_stats: List[str]
+    lb_tabs: List[str]
 
 # ─── Scoring logic (Asian Handicap) ──────────────────────────
 def calc_points(match: dict, predicted_winner: str) -> float:
@@ -319,6 +338,42 @@ def update_me(body: ProfileIn, user=Depends(get_current_user)):
 @app.get("/stages")
 def stages(user=Depends(get_current_user)):
     return STAGES
+
+def get_display_settings(conn) -> dict:
+    row = conn.execute("SELECT value FROM settings WHERE key='display'").fetchone()
+    if not row:
+        return dict(DEFAULT_DISPLAY_SETTINGS)
+    try:
+        cfg = json.loads(row["value"])
+    except (TypeError, ValueError):
+        return dict(DEFAULT_DISPLAY_SETTINGS)
+    # keep only known keys, in their configured order; fall back to defaults if empty
+    home_stats = [k for k in cfg.get("home_stats", []) if k in HOME_STAT_KEYS] or list(DEFAULT_DISPLAY_SETTINGS["home_stats"])
+    lb_tabs = [k for k in cfg.get("lb_tabs", []) if k in LB_TAB_KEYS] or list(DEFAULT_DISPLAY_SETTINGS["lb_tabs"])
+    return {"home_stats": home_stats, "lb_tabs": lb_tabs}
+
+@app.get("/settings")
+def settings(user=Depends(get_current_user)):
+    """Display config (home stat boxes / leaderboard tabs) — visible to everyone
+    so the UI knows what the admin chose to show."""
+    conn = get_db()
+    cfg = get_display_settings(conn)
+    conn.close()
+    return cfg
+
+@app.put("/admin/settings")
+def update_settings(body: DisplaySettingsIn, user=Depends(require_admin)):
+    home_stats = [k for k in body.home_stats if k in HOME_STAT_KEYS]
+    lb_tabs = [k for k in body.lb_tabs if k in LB_TAB_KEYS]
+    if not lb_tabs:
+        raise HTTPException(status_code=400, detail="ต้องเปิดอย่างน้อย 1 แท็บตารางคะแนน")
+    cfg = {"home_stats": home_stats, "lb_tabs": lb_tabs}
+    conn = get_db()
+    conn.execute("INSERT INTO settings (key, value) VALUES ('display', ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(cfg),))
+    conn.commit()
+    conn.close()
+    return {"ok": True, **cfg}
 
 # ─── Admin: user management (self-registration disabled) ─────
 @app.get("/admin/users")
