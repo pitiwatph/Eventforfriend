@@ -334,14 +334,15 @@ a{color:inherit;text-decoration:none}
 .lb-row{display:flex;align-items:center;gap:12px;padding:11px 13px;border-radius:14px;border:1px solid var(--line-soft);background:rgba(13,57,100,.4);transition:.15s}
 .lb-row:hover{background:var(--surface-2)}
 .lb-row .rk{width:26px;text-align:center;font-family:var(--font-display);font-weight:700;font-size:15px;color:var(--faint)}
-.lb-row .lb-av{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-family:var(--font-display);font-weight:600;font-size:14px;background:var(--surface-2);color:var(--gold);flex-shrink:0}
-.lb-row .lb-info{flex:1;min-width:0}
-.lb-row .lb-nm{font-family:var(--font-display);font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.lb-row .lb-meta{font-size:11px;color:var(--faint);margin-top:1px}
+.lb-row .lb-av,.urow .lb-av{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-family:var(--font-display);font-weight:600;font-size:14px;background:var(--surface-2);color:var(--gold);flex-shrink:0}
+.lb-row .lb-info,.urow .lb-info{flex:1;min-width:0}
+.lb-row .lb-nm,.urow .lb-nm{font-family:var(--font-display);font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lb-row .lb-meta,.urow .lb-meta{font-size:11px;color:var(--faint);margin-top:1px}
 .lb-row .lb-pts{font-family:var(--font-display);font-weight:700;font-size:18px;color:var(--gold-bright);font-variant-numeric:tabular-nums}
 .lb-row .lb-pts small{font-size:10px;color:var(--faint);font-weight:500}
 .lb-row.me{border-color:color-mix(in srgb,var(--gold) 50%,transparent);background:color-mix(in srgb,var(--gold) 9%,var(--surface));box-shadow:var(--shadow-gold)}
-.lb-row.me .you-tag{font-size:9.5px;color:#231a02;background:var(--gold);border-radius:999px;padding:1px 7px;font-weight:700;margin-left:6px}
+.you-tag{font-size:9.5px;border-radius:999px;padding:1px 7px;font-weight:700;margin-left:6px;white-space:nowrap}
+.lb-row.me .you-tag{color:#231a02;background:var(--gold)}
 
 /* ── History ──────────────────────────────────────────────── */
 .hist{display:flex;flex-direction:column;gap:10px}

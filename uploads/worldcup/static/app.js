@@ -14,7 +14,7 @@
     myById: {},          // match_id -> predicted_winner
     leaderboard: [],     // alias of lb.overall, kept for myStats()/rank
     lb: { overall: [], group: [], knockout: [] },
-    lbPhase: 'overall',
+    lbPhase: 'knockout',
     teams: [],           // registry [{id,name,flag}]
     stages: [],
     users: [],           // admin: user list
@@ -691,11 +691,10 @@
         <div class="urow">
           <div class="lb-av">${initials(u.display_name)}</div>
           <div class="lb-info">
-            <div class="lb-nm">${esc(u.display_name)}${u.is_admin ? '<span class="you-tag" style="background:var(--gold)">ADMIN</span>' : ''}</div>
+            <div class="lb-nm">${esc(u.display_name)}${u.is_admin ? '<span class="you-tag" style="background:var(--gold)">ADMIN</span>' : ''}${!u.is_admin && !u.knockout_eligible ? '<span class="you-tag" style="background:var(--loss-bg);color:var(--loss)">ไม่ร่วมน็อคเอาท์</span>' : ''}</div>
             <div class="lb-meta">@${esc(u.username)}</div>
           </div>
-          ${u.is_admin ? '' : `<button class="btn btn-sm ${u.knockout_eligible ? 'btn-gold' : 'btn-ghost'}" onclick="App.toggleKnockout(${u.id}, ${u.knockout_eligible ? 0 : 1})" title="${u.knockout_eligible ? 'ตัดสิทธิ์ทายรอบน็อคเอาท์' : 'ให้สิทธิ์ทายรอบน็อคเอาท์'}">${u.knockout_eligible ? '🥊 น็อคเอาท์ ✓' : '🥊 น็อคเอาท์ ✗'}</button>`}
-          <button class="btn btn-ghost btn-sm u-edit" onclick="App.editUser(${u.id}, ${JSON.stringify(u.display_name).replace(/"/g, '&quot;')}, ${JSON.stringify(u.username).replace(/"/g, '&quot;')})">แก้</button>
+          <button class="btn btn-ghost btn-sm u-edit" onclick="App.editUser(${u.id}, ${JSON.stringify(u.display_name).replace(/"/g, '&quot;')}, ${JSON.stringify(u.username).replace(/"/g, '&quot;')}, ${u.knockout_eligible ? 1 : 0})">แก้</button>
           ${u.is_admin ? '' : `<button class="btn btn-danger btn-sm" onclick="App.delUser(${u.id}, ${JSON.stringify(u.display_name).replace(/"/g, '&quot;')})" title="ลบผู้ใช้">🗑</button>`}
         </div>`).join('');
     }).catch(() => {});
@@ -726,19 +725,28 @@
     $('pfUserRow').style.display = '';
     $('pfUser').value = S.me.username;
     $('pfPass').value = '';
+    $('pfKoRow').style.display = 'none';
     $('modal').classList.add('open');
     setTimeout(() => $('pfName').focus(), 60);
   }
-  function editUser(id, name, username) {
+  function editUser(id, name, username, koEligible) {
     S.editTarget = { id };
     $('modalTitle').textContent = 'แก้ไขผู้ใช้ · Edit user';
     $('pfName').value = name;
     $('pfUserRow').style.display = '';
     $('pfUser').value = username || '';
     $('pfPass').value = '';
+    $('pfKoRow').style.display = '';
+    setPfKo(!!koEligible);
     $('modal').classList.add('open');
     setTimeout(() => $('pfName').focus(), 60);
   }
+  function setPfKo(on) {
+    S.pfKo = on;
+    $('pfKoSw').classList.toggle('on', on);
+    $('pfKoLabel').textContent = on ? 'อนุญาตให้ทาย' : 'ไม่อนุญาต';
+  }
+  function togglePfKnockout() { setPfKo(!S.pfKo); }
   function closeModal() { $('modal').classList.remove('open'); }
   function modalBg(ev) { if (ev.target.id === 'modal') closeModal(); }
 
@@ -753,6 +761,7 @@
         S.me.display_name = body.display_name;
         $('topAvatar').textContent = initials(S.me.display_name);
       } else {
+        body.knockout_eligible = !!S.pfKo;
         await api('PUT', '/admin/users/' + S.editTarget.id, { body });
       }
       toast('บันทึกแล้ว ✓');
@@ -854,14 +863,6 @@
   async function toggleLock(id, locked) {
     try { await api('POST', '/admin/lock', { body: { match_id: id, locked } }); toast(locked ? 'ปิดรับการทายแล้ว 🔒' : 'เปิดรับการทายอีกครั้ง 🔓'); await reloadAll(); }
     catch (e) { toast(e.detail || 'ทำรายการไม่สำเร็จ', true); }
-  }
-
-  async function toggleKnockout(id, eligible) {
-    try {
-      await api('PUT', '/admin/users/' + id, { body: { knockout_eligible: !!eligible } });
-      toast(eligible ? 'ให้สิทธิ์ทายรอบน็อคเอาท์แล้ว 🥊' : 'ตัดสิทธิ์ทายรอบน็อคเอาท์แล้ว');
-      renderAdminUsers();
-    } catch (e) { toast(e.detail || 'ทำรายการไม่สำเร็จ', true); }
   }
 
   // ── admin: live in-progress scores (one batch call) ───────────────
@@ -1024,10 +1025,10 @@
   window.App = {
     doLogin, logout,
     go, predict, addMatch, setResult, delMatch, setHdcp, refreshHdcpSel,
-    onTeamInput, onFlagInput, toggleLock, toggleKnockout,
+    onTeamInput, onFlagInput, toggleLock,
     saveLiveScores, fetchScores, loadApiFixtures, mapFixture, editHandicap, saveHandicap, renderAdmin,
     createUser, delUser, editUser, saveTeam, delTeam, editTeam, updateTeamPrev,
-    openProfile, closeModal, modalBg, saveProfile,
+    openProfile, closeModal, modalBg, saveProfile, togglePfKnockout,
     runQuery, sqlSample, saveCell,
     setLbPhase,
     _state: S,
