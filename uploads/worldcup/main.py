@@ -849,15 +849,25 @@ def update_cell(body: CellIn, user=Depends(require_admin)):
     return {"ok": True}
 
 # ─── Leaderboard ────────────────────────────────────────────
+# Group Stage and knockout (Round of 32 → Final) are scored as separate boards
+# so the knockout phase effectively "starts from zero" — plus an overall board
+# summing everything. No extra table: it's just a CASE on matches.stage.
+_PHASE_COND = {
+    "group":    "m.stage = 'Group Stage'",
+    "knockout": "m.stage != 'Group Stage'",
+    "overall":  "1=1",
+}
+
 @app.get("/leaderboard")
-def leaderboard(user=Depends(get_current_user)):
+def leaderboard(phase: str = "overall", user=Depends(get_current_user)):
+    cond = _PHASE_COND.get(phase, _PHASE_COND["overall"])
     conn = get_db()
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT u.display_name, u.username,
-               COALESCE(SUM(p.points),0) as total_points,
-               COUNT(p.id) as total_predictions,
-               COUNT(CASE WHEN p.points=2 THEN 1 END) as wins,
-               COUNT(CASE WHEN m.status='finished' THEN 1 END) as finished
+               COALESCE(SUM(CASE WHEN {cond} THEN p.points END),0) as total_points,
+               COUNT(CASE WHEN {cond} THEN p.id END) as total_predictions,
+               COUNT(CASE WHEN {cond} AND p.points=2 THEN 1 END) as wins,
+               COUNT(CASE WHEN {cond} AND m.status='finished' THEN 1 END) as finished
         FROM users u
         LEFT JOIN predictions p ON u.id=p.user_id
         LEFT JOIN matches m ON p.match_id=m.id

@@ -80,7 +80,12 @@
     <section class="view" id="view-leaderboard" data-screen-label="Leaderboard">
       <div class="page-head">
         <h1>ตารางคะแนน <span class="en">Leaderboard</span></h1>
-        <div class="sub">อันดับจากแต้มทายผลรวม · ranked by total points</div>
+        <div class="sub">อันดับจากแต้มทายผล · ranked by points</div>
+      </div>
+      <div class="lb-phase-tabs" id="lbPhaseTabs">
+        <button class="lb-phase-tab active" data-phase="overall" onclick="App.setLbPhase('overall')">🏆 รวมทั้งหมด</button>
+        <button class="lb-phase-tab" data-phase="group" onclick="App.setLbPhase('group')">🏟️ รอบแบ่งกลุ่ม</button>
+        <button class="lb-phase-tab" data-phase="knockout" onclick="App.setLbPhase('knockout')">🔥 น็อคเอาท์</button>
       </div>
       <div id="podium"></div>
       <div id="lbList" class="lb-list"></div>

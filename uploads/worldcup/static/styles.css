@@ -325,6 +325,11 @@ a{color:inherit;text-decoration:none}
 .pod-3 .pod-av{background:#c08a52;color:#2a1a0a}
 .pod-3 .pod-pts{color:#e0b483}
 
+.lb-phase-tabs{display:flex;gap:8px;margin-bottom:16px;overflow-x:auto}
+.lb-phase-tab{flex:1;white-space:nowrap;padding:9px 12px;border-radius:12px;border:1px solid var(--line-soft);background:rgba(13,57,100,.4);color:var(--faint);font-family:var(--font-display);font-weight:600;font-size:12.5px;cursor:pointer;transition:.15s}
+.lb-phase-tab:hover{background:var(--surface-2)}
+.lb-phase-tab.active{background:color-mix(in srgb,var(--gold) 16%,var(--surface));border-color:color-mix(in srgb,var(--gold) 50%,transparent);color:var(--gold-bright)}
+
 .lb-list{display:flex;flex-direction:column;gap:8px}
 .lb-row{display:flex;align-items:center;gap:12px;padding:11px 13px;border-radius:14px;border:1px solid var(--line-soft);background:rgba(13,57,100,.4);transition:.15s}
 .lb-row:hover{background:var(--surface-2)}

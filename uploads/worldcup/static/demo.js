@@ -129,9 +129,15 @@
     }).sort((a, b) => (a.kickoff_time || '').localeCompare(b.kickoff_time || ''));
   }
 
-  function leaderboardRows() {
+  function leaderboardRows(phase) {
+    const inPhase = (m) => {
+      if (!m) return false;
+      if (phase === 'group') return m.stage === 'Group Stage';
+      if (phase === 'knockout') return m.stage !== 'Group Stage';
+      return true; // overall
+    };
     return users.filter((u) => !u.is_admin).map((u) => {
-      const mine = predictions.filter((p) => p.user_id === u.id);
+      const mine = predictions.filter((p) => p.user_id === u.id && inPhase(matches.find((x) => x.id === p.match_id)));
       let total = 0, wins = 0, finished = 0;
       mine.forEach((p) => {
         const m = matches.find((x) => x.id === p.match_id);
@@ -174,6 +180,9 @@
     opts = opts || {};
     const body = opts.body || {};
     const me = opts.token ? userFromToken(opts.token) : null;
+    const [routePath, qs] = path.split('?');
+    const query = new URLSearchParams(qs || '');
+    path = routePath;
 
     if (method === 'POST' && path === '/token') {
       const u = users.find((x) => x.username === (opts.form && opts.form.username));
@@ -193,7 +202,7 @@
     if (method === 'GET' && path === '/teams') return ok([...teams].sort((a, b) => a.name.localeCompare(b.name)));
     if (method === 'GET' && path === '/matches') return ok([...matches].sort((a, b) => a.kickoff_time.localeCompare(b.kickoff_time)).map(publicMatch));
     if (method === 'GET' && path === '/predictions/mine') return ok(joinMine(me));
-    if (method === 'GET' && path === '/leaderboard') return ok(leaderboardRows());
+    if (method === 'GET' && path === '/leaderboard') return ok(leaderboardRows(query.get('phase') || 'overall'));
 
     if (method === 'POST' && path === '/predictions') {
       const m = matches.find((x) => x.id === body.match_id);

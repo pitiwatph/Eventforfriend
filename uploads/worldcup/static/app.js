@@ -12,7 +12,9 @@
     matches: [],
     mine: [],            // my predictions (joined w/ match)
     myById: {},          // match_id -> predicted_winner
-    leaderboard: [],
+    leaderboard: [],     // alias of lb.overall, kept for myStats()/rank
+    lb: { overall: [], group: [], knockout: [] },
+    lbPhase: 'overall',
     teams: [],           // registry [{id,name,flag}]
     stages: [],
     users: [],           // admin: user list
@@ -206,16 +208,19 @@
   }
 
   async function reloadAll() {
-    const [matches, mine, lb, teams, stages] = await Promise.all([
+    const [matches, mine, lbOverall, lbGroup, lbKnockout, teams, stages] = await Promise.all([
       api('GET', '/matches'),
       api('GET', '/predictions/mine'),
-      api('GET', '/leaderboard'),
+      api('GET', '/leaderboard?phase=overall'),
+      api('GET', '/leaderboard?phase=group'),
+      api('GET', '/leaderboard?phase=knockout'),
       api('GET', '/teams').catch(() => []),
       api('GET', '/stages').catch(() => ['Group Stage', 'Round of 32', 'Round of 16', 'Quarter-finals', 'Semi-finals', 'Third-Place Play-off', 'The Final']),
     ]);
     S.matches = matches;
     S.mine = mine;
-    S.leaderboard = lb;
+    S.lb = { overall: lbOverall, group: lbGroup, knockout: lbKnockout };
+    S.leaderboard = lbOverall;
     S.teams = teams || [];
     S.stages = stages || [];
     if (window.setTeamFlags) window.setTeamFlags(S.teams);
@@ -412,10 +417,24 @@
   // ════════════════════════════════════════════════════════════════
   //  VIEW: LEADERBOARD
   // ════════════════════════════════════════════════════════════════
+  function setLbPhase(phase) {
+    S.lbPhase = phase;
+    document.querySelectorAll('#lbPhaseTabs .lb-phase-tab').forEach((b) =>
+      b.classList.toggle('active', b.dataset.phase === phase));
+    renderLeaderboard();
+  }
+
   function renderLeaderboard() {
-    const lb = S.leaderboard;
+    const lb = S.lb[S.lbPhase] || [];
     const podium = $('podium'), list = $('lbList');
-    if (!lb.length) { podium.innerHTML = ''; list.innerHTML = `<div class="empty"><div class="ico">🏟️</div><div class="msg">ยังไม่มีคะแนน · No scores yet</div></div>`; return; }
+    if (!lb.length) {
+      podium.innerHTML = '';
+      const msg = S.lbPhase === 'knockout' ? 'รอบน็อคเอาท์ยังไม่เริ่ม · Knockout hasn\'t started'
+        : S.lbPhase === 'group' ? 'รอบแบ่งกลุ่มยังไม่มีคะแนน · No group scores yet'
+        : 'ยังไม่มีคะแนน · No scores yet';
+      list.innerHTML = `<div class="empty"><div class="ico">🏟️</div><div class="msg">${msg}</div></div>`;
+      return;
+    }
 
     const top3 = lb.slice(0, 3);
     const order = [top3[1], top3[0], top3[2]]; // 2nd, 1st, 3rd
@@ -996,6 +1015,7 @@
     createUser, delUser, editUser, saveTeam, delTeam, editTeam, updateTeamPrev,
     openProfile, closeModal, modalBg, saveProfile,
     runQuery, sqlSample, saveCell,
+    setLbPhase,
     _state: S,
   };
   document.addEventListener('DOMContentLoaded', init);
