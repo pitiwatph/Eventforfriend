@@ -31,6 +31,19 @@
   const HOME_STAT_KEYS_ORDER = ['knockout', 'overall', 'wins'];
   const LB_TAB_KEYS_ORDER = ['overall', 'group', 'knockout'];
   const LS = 'wc26_token';
+  const LS_SETTINGS = 'wc26_settings';
+  // Must match the ?v= query on this file in index.html and APP_BUILD on the
+  // server. If the server reports a newer build, the client reloads once to
+  // pull the fresh entry point (see reloadAll).
+  const BUILD = '8';
+
+  // Hydrate display settings from the last server-confirmed value so a returning
+  // user renders the admin's real config immediately (no 3-tab flash) and stays
+  // correct even if the /settings request later fails transiently.
+  try {
+    const cached = JSON.parse(localStorage.getItem(LS_SETTINGS));
+    if (cached && Array.isArray(cached.lb_tabs) && cached.lb_tabs.length) S.settings = cached;
+  } catch (_) {}
 
   // ── api: try network, fall back to demo ──────────────────────────
   function enterDemo() {
@@ -229,7 +242,22 @@
     S.leaderboard = lbOverall;
     S.teams = teams || [];
     S.stages = stages || [];
-    if (settings) S.settings = settings;
+    if (settings) {
+      // A new deploy is live but this tab is running an old bundle — reload once
+      // (guarded per target build so a client that genuinely can't fetch the new
+      // bundle never loops) to pull the fresh, no-store entry point.
+      if (settings.build && BUILD && settings.build !== BUILD) {
+        const k = 'wc26_reloaded_' + settings.build;
+        let already = true;   // fail safe: if storage is unusable, do NOT reload
+        try { already = !!sessionStorage.getItem(k); if (!already) sessionStorage.setItem(k, '1'); }
+        catch (_) { already = true; }
+        if (!already) { location.reload(); return; }
+      }
+      S.settings = { home_stats: settings.home_stats || S.settings.home_stats,
+                     lb_tabs: settings.lb_tabs || S.settings.lb_tabs };
+      try { localStorage.setItem(LS_SETTINGS, JSON.stringify(S.settings)); } catch (_) {}
+    }
+    if (!S.settings.lb_tabs.length) S.settings.lb_tabs = ['overall'];
     if (!S.settings.lb_tabs.includes(S.lbPhase)) S.lbPhase = S.settings.lb_tabs[0];
     if (window.setTeamFlags) window.setTeamFlags(S.teams);
     S.myById = {};
