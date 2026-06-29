@@ -35,7 +35,7 @@
   // Must match the ?v= query on this file in index.html and APP_BUILD on the
   // server. If the server reports a newer build, the client reloads once to
   // pull the fresh entry point (see reloadAll).
-  const BUILD = '8';
+  const BUILD = '9';
 
   // Hydrate display settings from the last server-confirmed value so a returning
   // user renders the admin's real config immediately (no 3-tab flash) and stays
@@ -599,14 +599,15 @@
 
     if (!done.length) { host.innerHTML = `<div class="empty"><div class="ico">📊</div><div class="msg">ยังไม่มีผลการแข่งขัน<br>No results yet</div></div>`; S.resultsDirty = false; return; }
 
-    // group by stage (canonical order), newest first within a stage
-    const order = S.stages && S.stages.length ? S.stages : Object.keys(STAGE_ABBR);
+    // group by stage; newest match first within a stage, and the stage holding
+    // the most recent match shown first so the latest result is always on top
     const byStage = {};
     done.forEach((m) => { (byStage[m.stage || 'Group Stage'] ||= []).push(m); });
-    const stageKeys = Object.keys(byStage).sort((a, b) => {
-      const ia = order.indexOf(a), ib = order.indexOf(b);
-      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+    const stageNewest = {};
+    Object.keys(byStage).forEach((sk) => {
+      stageNewest[sk] = Math.max(...byStage[sk].map((m) => koDate(m.kickoff_time).getTime()));
     });
+    const stageKeys = Object.keys(byStage).sort((a, b) => stageNewest[b] - stageNewest[a]);
     // single innerHTML write keeps 100+ rows fast
     const html = stageKeys.map((sk) => {
       const rows = byStage[sk].sort((a, b) => koDate(b.kickoff_time) - koDate(a.kickoff_time));
