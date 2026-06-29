@@ -31,6 +31,11 @@ HOME_STAT_KEYS = ["knockout", "overall", "wins"]
 LB_TAB_KEYS = ["overall", "group", "knockout"]
 DEFAULT_DISPLAY_SETTINGS = {"home_stats": list(HOME_STAT_KEYS), "lb_tabs": list(LB_TAB_KEYS)}
 
+# Bumped every deploy IN LOCKSTEP with the ?v= asset query in index.html and the
+# BUILD constant in app.js. The client compares this to its own build and force-
+# reloads once when they differ, so a stale cached bundle self-heals.
+APP_BUILD = "8"
+
 # Pre-defined teams (name -> flag image URL via flagcdn). Admin can edit/add later.
 TEAM_SEED = [
     ("Argentina", "ar"), ("Brazil", "br"), ("France", "fr"), ("England", "gb-eng"),
@@ -355,11 +360,12 @@ def get_display_settings(conn) -> dict:
 @app.get("/settings")
 def settings(user=Depends(get_current_user)):
     """Display config (home stat boxes / leaderboard tabs) — visible to everyone
-    so the UI knows what the admin chose to show."""
+    so the UI knows what the admin chose to show. Also reports the current build
+    so a stale client can detect a new deploy and reload itself."""
     conn = get_db()
     cfg = get_display_settings(conn)
     conn.close()
-    return cfg
+    return {**cfg, "build": APP_BUILD}
 
 @app.put("/admin/settings")
 def update_settings(body: DisplaySettingsIn, user=Depends(require_admin)):
@@ -966,7 +972,18 @@ class NoCacheStaticFiles(StaticFiles):
     """
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
-        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        ctype = resp.headers.get("content-type", "")
+        if path in ("", "/", "index.html") or ctype.startswith("text/html"):
+            # The HTML entry point can't be cache-busted with ?v= (nothing
+            # references it with a version), so forbid storing it outright —
+            # every navigation re-fetches the current index.html and thus the
+            # current ?v= asset references. The doc is tiny; cost is negligible.
+            resp.headers["Cache-Control"] = "no-store"
+            resp.headers["Pragma"] = "no-cache"
+            resp.headers["Expires"] = "0"
+        else:
+            # hashed/versioned assets: cheap 304 revalidation
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
         return resp
 
 app.mount("/", NoCacheStaticFiles(directory="static", html=True), name="static")
