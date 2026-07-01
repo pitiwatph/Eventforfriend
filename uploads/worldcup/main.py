@@ -34,7 +34,7 @@ DEFAULT_DISPLAY_SETTINGS = {"home_stats": list(HOME_STAT_KEYS), "lb_tabs": list(
 # Bumped every deploy IN LOCKSTEP with the ?v= asset query in index.html and the
 # BUILD constant in app.js. The client compares this to its own build and force-
 # reloads once when they differ, so a stale cached bundle self-heals.
-APP_BUILD = "10"
+APP_BUILD = "11"
 
 # Pre-defined teams (name -> flag image URL via flagcdn). Admin can edit/add later.
 TEAM_SEED = [
