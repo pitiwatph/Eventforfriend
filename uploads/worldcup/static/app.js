@@ -40,7 +40,7 @@
   // Must match the ?v= query on this file in index.html and APP_BUILD on the
   // server. If the server reports a newer build, the client reloads once to
   // pull the fresh entry point (see reloadAll).
-  const BUILD = '10';
+  const BUILD = '11';
 
   // ── api: try network, fall back to demo ──────────────────────────
   function enterDemo() {
@@ -754,6 +754,7 @@
           ${chip(st)}
         </div>
         <div class="faint" style="font-size:11px;margin-bottom:9px">🗓 ${fmtKO(m.kickoff_time)} · <span id="hdcp${m.id}">⚖️ ${esc(m.handicap_team)} ${m.handicap_value} <button class="lnk-edit" onclick="App.editHandicap(${m.id})" title="แก้ราคา handicap">✏️ แก้ราคา</button></span></div>
+        <div class="faint" style="font-size:11px;margin:-4px 0 9px"><span id="stg${m.id}">🏆 รอบ: ${esc(m.stage)} <button class="lnk-edit" onclick="App.editStage(${m.id})" title="แก้รอบการแข่งขัน">✏️ แก้รอบ</button></span></div>
         ${fin ? '' : `<div class="faint" style="font-size:11px;margin:-4px 0 9px">${apiMapHtml(m)}</div>`}
         <div class="am-form">
           <input class="in" id="rh${m.id}" type="number" min="0" placeholder="0" value="${fin ? m.score_home : ''}">
@@ -1070,6 +1071,30 @@
     } catch (e) { toast(e.detail || 'อัปเดตราคาไม่สำเร็จ', true); }
   }
 
+  // ── admin: fix a match's stage/round anytime (predictions kept) ────
+  function editStage(id) {
+    const m = S.matches.find((x) => x.id === id);
+    if (!m) return;
+    const box = $('stg' + id);
+    if (!box) return;
+    const opts = (S.stages || []).map((s) => `<option value="${esc(s)}" ${m.stage === s ? 'selected' : ''}>${esc(s)}</option>`).join('');
+    box.innerHTML = `🏆 รอบ:
+      <select class="in in-mini" id="est${id}" style="max-width:190px">${opts}</select>
+      <button class="btn btn-gold btn-sm" onclick="App.saveStage(${id})">✓</button>
+      <button class="btn btn-ghost btn-sm" onclick="App.renderAdmin()">✕</button>`;
+  }
+  async function saveStage(id) {
+    const stage = $('est' + id).value;
+    try {
+      // only the stage field changes; every user's prediction row is untouched
+      // (points are unaffected by stage — the leaderboard just re-buckets it into
+      // the correct Group/Knockout board)
+      await api('PUT', '/matches/' + id, { body: { stage } });
+      toast('อัปเดตรอบแล้ว · การทายทุกคนยังอยู่ครบ ✓');
+      await reloadAll();
+    } catch (e) { toast(e.detail || 'อัปเดตรอบไม่สำเร็จ', true); }
+  }
+
   async function setResult(id) {
     const h = $('rh' + id).value, a = $('ra' + id).value;
     if (h === '' || a === '') { toast('กรอกสกอร์ให้ครบ', true); return; }
@@ -1112,7 +1137,7 @@
     doLogin, logout,
     go, predict, addMatch, setResult, delMatch, setHdcp, refreshHdcpSel,
     onTeamInput, onFlagInput, toggleLock,
-    saveLiveScores, fetchScores, loadApiFixtures, mapFixture, editHandicap, saveHandicap, renderAdmin,
+    saveLiveScores, fetchScores, loadApiFixtures, mapFixture, editHandicap, saveHandicap, editStage, saveStage, renderAdmin,
     saveDisplaySettings,
     createUser, delUser, editUser, saveTeam, delTeam, editTeam, updateTeamPrev,
     openProfile, closeModal, modalBg, saveProfile, togglePfKnockout,
