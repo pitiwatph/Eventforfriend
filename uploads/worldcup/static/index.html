@@ -11,7 +11,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Kanit:ital,wght@0,400;0,500;0,600;0,700;1,600;1,700&family=Noto+Sans+Thai:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=11">
+<link rel="stylesheet" href="styles.css?v=12">
 </head>
 <body>
 
@@ -89,6 +89,15 @@
       <div class="lb-phase-tabs" id="lbPhaseTabs"></div>
       <div id="podium"></div>
       <div id="lbList" class="lb-list"></div>
+    </section>
+
+    <!-- ── CHAMPION ── -->
+    <section class="view" id="view-champion" data-screen-label="Champion">
+      <div class="page-head">
+        <h1>ทายแชมป์ <span class="en">Champion</span></h1>
+        <div class="sub" id="champSub">ทายทีมที่จะได้แชมป์จาก 8 ทีมสุดท้าย</div>
+      </div>
+      <div id="champBody"></div>
     </section>
 
     <!-- ── HISTORY ── -->
@@ -182,6 +191,13 @@
         </form>
       </div>
 
+      <!-- Champion prediction config -->
+      <div class="card">
+        <div class="section-label" style="margin-top:0"><span class="dot"></span> 🏆 ทายแชมป์ · Champion prediction</div>
+        <div class="faint" style="font-size:11px;margin:-4px 0 10px">ทีมให้เลือกมาจากนัดรอบ Quarter-finals อัตโนมัติ · ปิดรับตามเวลาด้านล่าง · ประกาศแชมป์เมื่อจบเพื่อแจกคะแนน</div>
+        <div id="champAdmin"></div>
+      </div>
+
       <!-- Live in-progress scores -->
       <div class="card">
         <div class="section-label" style="margin-top:0"><span class="dot"></span> 🔴 สกอร์สด · กำลังแข่งขัน</div>
@@ -267,6 +283,9 @@
     <button class="tab" data-view="leaderboard" onclick="App.go('leaderboard')">
       <span class="ic">🏅</span><span class="lb">คะแนน</span><span class="en">Ranks</span>
     </button>
+    <button class="tab" data-view="champion" onclick="App.go('champion')">
+      <span class="ic">🏆</span><span class="lb">แชมป์</span><span class="en">Champion</span>
+    </button>
     <button class="tab" data-view="history" onclick="App.go('history')">
       <span class="ic">📜</span><span class="lb">ประวัติ</span><span class="en">History</span>
     </button>
@@ -317,9 +336,9 @@
   <div class="tw-body" id="twBody"></div>
 </div>
 
-<script src="flags.js?v=11"></script>
-<script src="demo.js?v=11"></script>
-<script src="app.js?v=11"></script>
-<script src="tweaks.js?v=11"></script>
+<script src="flags.js?v=12"></script>
+<script src="demo.js?v=12"></script>
+<script src="app.js?v=12"></script>
+<script src="tweaks.js?v=12"></script>
 </body>
 </html>

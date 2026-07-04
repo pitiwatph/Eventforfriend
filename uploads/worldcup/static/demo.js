@@ -50,6 +50,8 @@
   let uid = 1, mid = 1, pid = 1;
   const users = [], matches = [], predictions = [];
   let displaySettings = { home_stats: ['knockout', 'overall', 'wins'], lb_tabs: ['overall', 'group', 'knockout'] };
+  let championCfg = { deadline: '2026-07-09T23:59:59', points: 4, champion_team: null };
+  const championPicks = [];   // {user_id, team, points}
 
   function addUser(username, display, isAdmin) {
     users.push({ id: uid++, username, display_name: display, password: username === 'admin' ? 'admin1234' : '1234', is_admin: isAdmin ? 1 : 0, knockout_eligible: 1 });
@@ -146,6 +148,10 @@
         if (p.points === 2) wins++;
         if (m && m.status === 'finished') finished++;
       });
+      if (phase !== 'group') {   // champion-pick bonus counts on knockout/overall boards
+        const cp = championPicks.find((p) => p.user_id === u.id);
+        if (cp && cp.points) total += cp.points;
+      }
       return { display_name: u.display_name, username: u.username, total_points: r4(total), total_predictions: mine.length, wins, finished };
     }).sort((a, b) => (b.total_points - a.total_points) || (b.wins - a.wins));
   }
@@ -201,6 +207,32 @@
     }
     if (method === 'GET' && path === '/stages') return ok(STAGES);
     if (method === 'GET' && path === '/settings') return ok(displaySettings);
+    if (method === 'GET' && path === '/champion') {
+      const pool = [];
+      const seen = {};
+      matches.filter((m) => m.stage === 'Quarter-finals').forEach((m) => {
+        [[m.team_home, m.team_home_flag], [m.team_away, m.team_away_flag]].forEach(([n, f]) => {
+          if (n && !seen[n]) { seen[n] = 1; pool.push({ name: n, flag: f || '' }); }
+        });
+      });
+      const locked = !!championCfg.champion_team || Date.now() > new Date(championCfg.deadline).getTime();
+      const mine = championPicks.find((p) => p.user_id === me.id);
+      const nonAdmin = championPicks.filter((p) => { const u = users.find((x) => x.id === p.user_id); return u && !u.is_admin; });
+      const picks = locked ? nonAdmin.map((p) => {
+        const u = users.find((x) => x.id === p.user_id);
+        return { display_name: u.display_name, username: u.username, team: p.team, points: p.points };
+      }) : null;
+      return ok({ deadline: championCfg.deadline, points: championCfg.points, champion_team: championCfg.champion_team,
+                  locked, teams: pool, my_pick: mine ? mine.team : null, picks, total_picked: nonAdmin.length,
+                  eligible: !!me.is_admin || !!me.knockout_eligible });
+    }
+    if (method === 'POST' && path === '/champion/pick') {
+      if (championCfg.champion_team || Date.now() > new Date(championCfg.deadline).getTime()) return err(400, 'ปิดรับการทายแชมป์แล้ว');
+      if (!me.is_admin && !me.knockout_eligible) return err(403, 'คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้');
+      const mine = championPicks.find((p) => p.user_id === me.id);
+      if (mine) { mine.team = body.team; } else { championPicks.push({ user_id: me.id, team: body.team, points: null }); }
+      return ok({ ok: true, team: body.team });
+    }
     if (method === 'GET' && path === '/teams') return ok([...teams].sort((a, b) => a.name.localeCompare(b.name)));
     if (method === 'GET' && path === '/matches') return ok([...matches].sort((a, b) => a.kickoff_time.localeCompare(b.kickoff_time)).map(publicMatch));
     if (method === 'GET' && path === '/predictions/mine') return ok(joinMine(me));
@@ -222,6 +254,17 @@
     // ── admin only below ──
     if (!me.is_admin) return err(403, 'Admin only');
 
+    if (method === 'PUT' && path === '/admin/champion') {
+      if (body.deadline != null) championCfg.deadline = body.deadline;
+      if (body.points != null) championCfg.points = Number(body.points);
+      if (body.champion_team != null) championCfg.champion_team = body.champion_team || null;
+      let awarded = 0;
+      championPicks.forEach((p) => {
+        if (championCfg.champion_team) { p.points = p.team === championCfg.champion_team ? championCfg.points : 0; if (p.points > 0) awarded++; }
+        else p.points = null;
+      });
+      return ok({ ok: true, ...championCfg, awarded });
+    }
     if (method === 'PUT' && path === '/admin/settings') {
       const HOME_KEYS = ['knockout', 'overall', 'wins'], LB_KEYS = ['overall', 'group', 'knockout'];
       const home_stats = (body.home_stats || []).filter((k) => HOME_KEYS.includes(k));
