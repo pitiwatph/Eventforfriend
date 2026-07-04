@@ -34,7 +34,11 @@ DEFAULT_DISPLAY_SETTINGS = {"home_stats": list(HOME_STAT_KEYS), "lb_tabs": list(
 # Bumped every deploy IN LOCKSTEP with the ?v= asset query in index.html and the
 # BUILD constant in app.js. The client compares this to its own build and force-
 # reloads once when they differ, so a stale cached bundle self-heals.
-APP_BUILD = "11"
+APP_BUILD = "12"
+
+# Champion prediction: pick one of the 8 quarter-finalists before the deadline
+# (Bangkok time). Correct pick = bonus points on the knockout/overall boards.
+DEFAULT_CHAMPION_CFG = {"deadline": "2026-07-09T23:59:59", "points": 4.0, "champion_team": None}
 
 # Pre-defined teams (name -> flag image URL via flagcdn). Admin can edit/add later.
 TEAM_SEED = [
@@ -110,6 +114,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS champion_picks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER UNIQUE NOT NULL,
+            team TEXT NOT NULL,
+            picked_at TEXT DEFAULT (datetime('now')),
+            points REAL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
         );
     """)
     # seed admin
@@ -240,6 +252,14 @@ class MapIn(BaseModel):
 class DisplaySettingsIn(BaseModel):
     home_stats: List[str]
     lb_tabs: List[str]
+
+class ChampionPickIn(BaseModel):
+    team: str
+
+class ChampionCfgIn(BaseModel):
+    deadline: Optional[str] = None       # Bangkok-local, e.g. 2026-07-09T23:59
+    points: Optional[float] = None       # bonus for a correct pick
+    champion_team: Optional[str] = None  # set = declare the champion (awards points); "" = clear
 
 # ─── Scoring logic (Asian Handicap) ──────────────────────────
 def calc_points(match: dict, predicted_winner: str) -> float:
@@ -380,6 +400,111 @@ def update_settings(body: DisplaySettingsIn, user=Depends(require_admin)):
     conn.commit()
     conn.close()
     return {"ok": True, **cfg}
+
+# ─── Champion prediction (ทายแชมป์) ─────────────────────────────────
+def _champ_cfg(conn) -> dict:
+    row = conn.execute("SELECT value FROM settings WHERE key='champion'").fetchone()
+    cfg = dict(DEFAULT_CHAMPION_CFG)
+    if row:
+        try:
+            cfg.update({k: v for k, v in json.loads(row["value"]).items() if k in cfg})
+        except (TypeError, ValueError):
+            pass
+    return cfg
+
+def _champ_locked(cfg: dict) -> bool:
+    """Picking closes at the deadline (Bangkok time) or once a champion is declared."""
+    if cfg.get("champion_team"):
+        return True
+    dl = _ko_bkk(cfg.get("deadline") or "")
+    if dl is None:
+        return False
+    return (datetime.utcnow() + timedelta(hours=7)) > dl
+
+def _champ_pool(conn) -> list:
+    """The 8 pickable teams = every team that appears in a Quarter-finals fixture."""
+    rows = conn.execute(
+        "SELECT team_home, team_away, team_home_flag, team_away_flag "
+        "FROM matches WHERE stage='Quarter-finals'").fetchall()
+    seen, pool = set(), []
+    for r in rows:
+        for name, fl in ((r["team_home"], r["team_home_flag"]), (r["team_away"], r["team_away_flag"])):
+            if name and name not in seen:
+                seen.add(name)
+                pool.append({"name": name, "flag": fl or ""})
+    return pool
+
+@app.get("/champion")
+def champion(user=Depends(get_current_user)):
+    conn = get_db()
+    cfg = _champ_cfg(conn)
+    locked = _champ_locked(cfg)
+    pool = _champ_pool(conn)
+    mine = conn.execute("SELECT team FROM champion_picks WHERE user_id=?", (user["id"],)).fetchone()
+    picks = None
+    if locked:  # picks stay hidden until betting closes, then everyone sees them
+        picks = [dict(r) for r in conn.execute("""
+            SELECT u.display_name, u.username, cp.team, cp.points
+            FROM champion_picks cp JOIN users u ON u.id=cp.user_id
+            WHERE u.is_admin=0 ORDER BY cp.team, u.display_name""").fetchall()]
+    total_picked = conn.execute(
+        "SELECT COUNT(*) AS n FROM champion_picks cp JOIN users u ON u.id=cp.user_id WHERE u.is_admin=0"
+    ).fetchone()["n"]
+    conn.close()
+    return {"deadline": cfg["deadline"], "points": cfg["points"], "champion_team": cfg["champion_team"],
+            "locked": locked, "teams": pool, "my_pick": mine["team"] if mine else None,
+            "picks": picks, "total_picked": total_picked,
+            "eligible": bool(user["is_admin"]) or bool(user["knockout_eligible"])}
+
+@app.post("/champion/pick")
+def champion_pick(body: ChampionPickIn, user=Depends(get_current_user)):
+    conn = get_db()
+    cfg = _champ_cfg(conn)
+    if _champ_locked(cfg):
+        conn.close()
+        raise HTTPException(status_code=400, detail="ปิดรับการทายแชมป์แล้ว")
+    if not user["is_admin"] and not user["knockout_eligible"]:
+        conn.close()
+        raise HTTPException(status_code=403, detail="คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้")
+    pool = {t["name"] for t in _champ_pool(conn)}
+    if not pool:
+        conn.close()
+        raise HTTPException(status_code=400, detail="ยังไม่ประกาศ 8 ทีมสุดท้าย (รอแอดมินเพิ่มนัดรอบ Quarter-finals)")
+    if body.team not in pool:
+        conn.close()
+        raise HTTPException(status_code=400, detail="เลือกได้เฉพาะทีมที่เข้ารอบ 8 ทีมสุดท้าย")
+    conn.execute("""INSERT INTO champion_picks (user_id, team, picked_at)
+                    VALUES (?,?,datetime('now'))
+                    ON CONFLICT(user_id) DO UPDATE SET team=excluded.team, picked_at=excluded.picked_at""",
+                 (user["id"], body.team))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "team": body.team}
+
+@app.put("/admin/champion")
+def champion_admin(body: ChampionCfgIn, user=Depends(require_admin)):
+    conn = get_db()
+    cfg = _champ_cfg(conn)
+    if body.deadline is not None:
+        cfg["deadline"] = body.deadline
+    if body.points is not None:
+        cfg["points"] = body.points
+    if body.champion_team is not None:
+        cfg["champion_team"] = body.champion_team or None
+    conn.execute("INSERT INTO settings (key, value) VALUES ('champion', ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(cfg),))
+    # (re)award the bonus: correct picks get cfg points, everyone else 0;
+    # clearing the champion resets points to NULL (undecided)
+    awarded = 0
+    if cfg["champion_team"]:
+        conn.execute("UPDATE champion_picks SET points = CASE WHEN team=? THEN ? ELSE 0 END",
+                     (cfg["champion_team"], cfg["points"]))
+        awarded = conn.execute("SELECT COUNT(*) AS n FROM champion_picks WHERE points > 0").fetchone()["n"]
+    else:
+        conn.execute("UPDATE champion_picks SET points = NULL")
+    conn.commit()
+    conn.close()
+    return {"ok": True, **cfg, "awarded": awarded}
 
 # ─── Admin: user management (self-registration disabled) ─────
 @app.get("/admin/users")
@@ -946,10 +1071,13 @@ def leaderboard(phase: str = "overall", user=Depends(get_current_user)):
     # knockout board only lists players still flagged in for this round —
     # someone who dropped out shouldn't clutter it with a static 0
     roster_filter = "AND u.knockout_eligible=1" if phase == "knockout" else ""
+    # champion-pick bonus counts toward the knockout and overall boards
+    champ_bonus = ("COALESCE((SELECT cp.points FROM champion_picks cp WHERE cp.user_id=u.id),0)"
+                   if phase in ("knockout", "overall") else "0")
     conn = get_db()
     rows = conn.execute(f"""
         SELECT u.display_name, u.username,
-               COALESCE(SUM(CASE WHEN {cond} THEN p.points END),0) as total_points,
+               COALESCE(SUM(CASE WHEN {cond} THEN p.points END),0) + {champ_bonus} as total_points,
                COUNT(CASE WHEN {cond} THEN p.id END) as total_predictions,
                COUNT(CASE WHEN {cond} AND p.points=2 THEN 1 END) as wins,
                COUNT(CASE WHEN {cond} AND m.status='finished' THEN 1 END) as finished
