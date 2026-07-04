@@ -41,7 +41,7 @@
   // Must match the ?v= query on this file in index.html and APP_BUILD on the
   // server. If the server reports a newer build, the client reloads once to
   // pull the fresh entry point (see reloadAll).
-  const BUILD = '12';
+  const BUILD = '13';
 
   // ── api: try network, fall back to demo ──────────────────────────
   function enterDemo() {
@@ -549,7 +549,7 @@
       }
       if (!(c.teams || []).length) {
         host.innerHTML = `<div class="card">
-          <div class="empty"><div class="ico">⏳</div><div class="msg">รอประกาศ 8 ทีมสุดท้าย (รอบ Quarter-finals)<br>Waiting for the quarter-finalists</div></div>
+          <div class="empty"><div class="ico">⏳</div><div class="msg">รอแอดมินเพิ่มรายชื่อทีมให้ทาย<br>Waiting for the admin to set the teams</div></div>
         </div>`;
         return;
       }
@@ -807,14 +807,27 @@
   }
 
   // ── admin: champion prediction config ─────────────────────────────
+  function champTeamNames() { return ((S.champion && S.champion.teams) || []).map((t) => t.name); }
   function renderChampAdmin() {
     const host = $('champAdmin');
     if (!host) return;
     const c = S.champion || { deadline: '2026-07-09T23:59', points: 4, champion_team: null, teams: [], total_picked: 0, locked: false };
     const dl = (c.deadline || '').slice(0, 16);
+    const teams = c.teams || [];
     const opts = ['<option value="">— เลือกทีมแชมป์ —</option>'].concat(
-      (c.teams || []).map((t) => `<option value="${esc(t.name)}" ${c.champion_team === t.name ? 'selected' : ''}>${esc(t.name)}</option>`)).join('');
+      teams.map((t) => `<option value="${esc(t.name)}" ${c.champion_team === t.name ? 'selected' : ''}>${esc(t.name)}</option>`)).join('');
+    const chips = teams.length
+      ? teams.map((t) => `<span class="team-chip">${flag(t.name, t.flag)} ${esc(t.name)}<button title="เอาออก" onclick="App.removeChampTeam(${JSON.stringify(t.name).replace(/"/g, '&quot;')})">✕</button></span>`).join('')
+      : `<span class="faint" style="font-size:12px">ยังไม่มีทีม — เพิ่มทีมด้านล่าง</span>`;
     host.innerHTML = `
+      <div class="form-row">
+        <label class="fld">ทีมที่ให้ทายแชมป์ · Pickable teams (${teams.length})</label>
+        <div class="chip-pool">${chips}</div>
+        <div class="flagpick" style="margin-top:8px">
+          <input class="in" id="chAddTeam" list="teamNames" placeholder="พิมพ์ชื่อทีมจากทะเบียนแล้วกดเพิ่ม" autocomplete="off">
+          <button class="btn btn-ghost btn-sm" onclick="App.addChampTeam()">+ เพิ่มทีม</button>
+        </div>
+      </div>
       <div class="form-2">
         <div class="form-row"><label class="fld">ปิดรับ (เวลาไทย)</label><input class="in" id="chDl" type="datetime-local" value="${dl}"></div>
         <div class="form-row"><label class="fld">คะแนนที่ได้</label><input class="in" id="chPts" type="number" step="0.5" min="0" value="${c.points}"></div>
@@ -825,7 +838,26 @@
         <button class="btn btn-gold btn-sm" onclick="App.declareChampion()">👑 ประกาศแชมป์</button>
         ${c.champion_team ? `<button class="btn btn-danger btn-sm" onclick="App.clearChampion()">ยกเลิกประกาศ</button>` : ''}
       </div>
-      <div class="faint" style="font-size:11px;margin-top:8px">สถานะ: ${c.locked ? '🔒 ปิดรับแล้ว' : '✏️ เปิดรับอยู่'} · ทายแล้ว ${c.total_picked || 0} คน${c.champion_team ? ` · แชมป์: ${esc(c.champion_team)}` : ''}${(c.teams || []).length ? '' : ' · ยังไม่มีนัด Quarter-finals ให้เลือกทีม'}</div>`;
+      <div class="faint" style="font-size:11px;margin-top:8px">สถานะ: ${c.locked ? '🔒 ปิดรับแล้ว' : '✏️ เปิดรับอยู่'} · ทายแล้ว ${c.total_picked || 0} คน${c.champion_team ? ` · แชมป์: ${esc(c.champion_team)}` : ''}</div>`;
+  }
+  async function saveChampTeams(names, doneMsg) {
+    try {
+      const r = await api('PUT', '/admin/champion', { body: { teams: names } });
+      toast(r.removed ? `${doneMsg} · ล้างการทายที่ทีมถูกเอาออก ${r.removed} รายการ` : doneMsg);
+      await reloadAll();
+    } catch (e) { toast(e.detail || 'อัปเดตรายชื่อทีมไม่สำเร็จ', true); }
+  }
+  async function addChampTeam() {
+    const inp = $('chAddTeam');
+    const v = (inp.value || '').trim();
+    if (!v) { toast('พิมพ์ชื่อทีมก่อน', true); return; }
+    const names = champTeamNames();
+    if (names.includes(v)) { toast('ทีมนี้อยู่ในรายการแล้ว', true); return; }
+    inp.value = '';
+    await saveChampTeams(names.concat(v), `เพิ่ม ${v} แล้ว ✓`);
+  }
+  async function removeChampTeam(name) {
+    await saveChampTeams(champTeamNames().filter((n) => n !== name), `เอา ${name} ออกแล้ว`);
   }
   async function saveChampCfg() {
     const deadline = $('chDl').value;
@@ -1266,7 +1298,7 @@
     go, predict, addMatch, setResult, delMatch, setHdcp, refreshHdcpSel,
     onTeamInput, onFlagInput, toggleLock,
     saveLiveScores, fetchScores, loadApiFixtures, mapFixture, editHandicap, saveHandicap, editStage, saveStage, renderAdmin,
-    pickChampion, saveChampCfg, declareChampion, clearChampion,
+    pickChampion, saveChampCfg, declareChampion, clearChampion, addChampTeam, removeChampTeam,
     saveDisplaySettings,
     createUser, delUser, editUser, saveTeam, delTeam, editTeam, updateTeamPrev,
     openProfile, closeModal, modalBg, saveProfile, togglePfKnockout,

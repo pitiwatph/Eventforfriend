@@ -50,7 +50,7 @@
   let uid = 1, mid = 1, pid = 1;
   const users = [], matches = [], predictions = [];
   let displaySettings = { home_stats: ['knockout', 'overall', 'wins'], lb_tabs: ['overall', 'group', 'knockout'] };
-  let championCfg = { deadline: '2026-07-09T23:59:59', points: 4, champion_team: null };
+  let championCfg = { deadline: '2026-07-09T23:59:59', points: 4, champion_team: null, teams: [] };
   const championPicks = [];   // {user_id, team, points}
 
   function addUser(username, display, isAdmin) {
@@ -208,13 +208,8 @@
     if (method === 'GET' && path === '/stages') return ok(STAGES);
     if (method === 'GET' && path === '/settings') return ok(displaySettings);
     if (method === 'GET' && path === '/champion') {
-      const pool = [];
-      const seen = {};
-      matches.filter((m) => m.stage === 'Quarter-finals').forEach((m) => {
-        [[m.team_home, m.team_home_flag], [m.team_away, m.team_away_flag]].forEach(([n, f]) => {
-          if (n && !seen[n]) { seen[n] = 1; pool.push({ name: n, flag: f || '' }); }
-        });
-      });
+      const flagOf = (n) => { const t = teams.find((x) => x.name === n); return t ? t.flag : ''; };
+      const pool = (championCfg.teams || []).map((n) => ({ name: n, flag: flagOf(n) }));
       const locked = !!championCfg.champion_team || Date.now() > new Date(championCfg.deadline).getTime();
       const mine = championPicks.find((p) => p.user_id === me.id);
       const nonAdmin = championPicks.filter((p) => { const u = users.find((x) => x.id === p.user_id); return u && !u.is_admin; });
@@ -258,12 +253,23 @@
       if (body.deadline != null) championCfg.deadline = body.deadline;
       if (body.points != null) championCfg.points = Number(body.points);
       if (body.champion_team != null) championCfg.champion_team = body.champion_team || null;
+      let removed = 0;
+      if (body.teams != null) {
+        const seen = {}, clean = [];
+        body.teams.forEach((n) => { n = (n || '').trim(); if (n && !seen[n]) { seen[n] = 1; clean.push(n); } });
+        championCfg.teams = clean;
+        if (!championCfg.champion_team) {   // drop picks whose team was removed
+          for (let i = championPicks.length - 1; i >= 0; i--) {
+            if (!clean.includes(championPicks[i].team)) { championPicks.splice(i, 1); removed++; }
+          }
+        }
+      }
       let awarded = 0;
       championPicks.forEach((p) => {
         if (championCfg.champion_team) { p.points = p.team === championCfg.champion_team ? championCfg.points : 0; if (p.points > 0) awarded++; }
         else p.points = null;
       });
-      return ok({ ok: true, ...championCfg, awarded });
+      return ok({ ok: true, ...championCfg, awarded, removed });
     }
     if (method === 'PUT' && path === '/admin/settings') {
       const HOME_KEYS = ['knockout', 'overall', 'wins'], LB_KEYS = ['overall', 'group', 'knockout'];

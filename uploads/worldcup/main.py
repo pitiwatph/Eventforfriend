@@ -34,11 +34,13 @@ DEFAULT_DISPLAY_SETTINGS = {"home_stats": list(HOME_STAT_KEYS), "lb_tabs": list(
 # Bumped every deploy IN LOCKSTEP with the ?v= asset query in index.html and the
 # BUILD constant in app.js. The client compares this to its own build and force-
 # reloads once when they differ, so a stale cached bundle self-heals.
-APP_BUILD = "12"
+APP_BUILD = "13"
 
-# Champion prediction: pick one of the 8 quarter-finalists before the deadline
-# (Bangkok time). Correct pick = bonus points on the knockout/overall boards.
-DEFAULT_CHAMPION_CFG = {"deadline": "2026-07-09T23:59:59", "points": 4.0, "champion_team": None}
+# Champion prediction: pick one team (from an admin-managed shortlist) to win
+# the title before the deadline (Bangkok time). Correct pick = bonus points on
+# the knockout/overall boards. The admin curates `teams` — e.g. start with the
+# last 16 and trim losers down to 8.
+DEFAULT_CHAMPION_CFG = {"deadline": "2026-07-09T23:59:59", "points": 4.0, "champion_team": None, "teams": []}
 
 # Pre-defined teams (name -> flag image URL via flagcdn). Admin can edit/add later.
 TEAM_SEED = [
@@ -260,6 +262,7 @@ class ChampionCfgIn(BaseModel):
     deadline: Optional[str] = None       # Bangkok-local, e.g. 2026-07-09T23:59
     points: Optional[float] = None       # bonus for a correct pick
     champion_team: Optional[str] = None  # set = declare the champion (awards points); "" = clear
+    teams: Optional[List[str]] = None    # admin-managed shortlist of pickable teams (replaces the whole list)
 
 # ─── Scoring logic (Asian Handicap) ──────────────────────────
 def calc_points(match: dict, predicted_winner: str) -> float:
@@ -421,17 +424,19 @@ def _champ_locked(cfg: dict) -> bool:
         return False
     return (datetime.utcnow() + timedelta(hours=7)) > dl
 
-def _champ_pool(conn) -> list:
-    """The 8 pickable teams = every team that appears in a Quarter-finals fixture."""
-    rows = conn.execute(
-        "SELECT team_home, team_away, team_home_flag, team_away_flag "
-        "FROM matches WHERE stage='Quarter-finals'").fetchall()
+def _champ_pool(conn, cfg=None) -> list:
+    """Pickable teams = the admin-managed shortlist in the champion config; flags
+    are resolved from the teams registry by name."""
+    cfg = cfg or _champ_cfg(conn)
+    names = cfg.get("teams") or []
+    if not names:
+        return []
+    flags = {r["name"]: r["flag"] for r in conn.execute("SELECT name, flag FROM teams").fetchall()}
     seen, pool = set(), []
-    for r in rows:
-        for name, fl in ((r["team_home"], r["team_home_flag"]), (r["team_away"], r["team_away_flag"])):
-            if name and name not in seen:
-                seen.add(name)
-                pool.append({"name": name, "flag": fl or ""})
+    for n in names:
+        if n and n not in seen:
+            seen.add(n)
+            pool.append({"name": n, "flag": flags.get(n, "")})
     return pool
 
 @app.get("/champion")
@@ -439,7 +444,7 @@ def champion(user=Depends(get_current_user)):
     conn = get_db()
     cfg = _champ_cfg(conn)
     locked = _champ_locked(cfg)
-    pool = _champ_pool(conn)
+    pool = _champ_pool(conn, cfg)
     mine = conn.execute("SELECT team FROM champion_picks WHERE user_id=?", (user["id"],)).fetchone()
     picks = None
     if locked:  # picks stay hidden until betting closes, then everyone sees them
@@ -466,13 +471,13 @@ def champion_pick(body: ChampionPickIn, user=Depends(get_current_user)):
     if not user["is_admin"] and not user["knockout_eligible"]:
         conn.close()
         raise HTTPException(status_code=403, detail="คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้")
-    pool = {t["name"] for t in _champ_pool(conn)}
+    pool = {t["name"] for t in _champ_pool(conn, cfg)}
     if not pool:
         conn.close()
-        raise HTTPException(status_code=400, detail="ยังไม่ประกาศ 8 ทีมสุดท้าย (รอแอดมินเพิ่มนัดรอบ Quarter-finals)")
+        raise HTTPException(status_code=400, detail="ยังไม่มีรายชื่อทีมให้ทาย (รอแอดมินเพิ่มทีม)")
     if body.team not in pool:
         conn.close()
-        raise HTTPException(status_code=400, detail="เลือกได้เฉพาะทีมที่เข้ารอบ 8 ทีมสุดท้าย")
+        raise HTTPException(status_code=400, detail="เลือกได้เฉพาะทีมในรายการที่แอดมินกำหนด")
     conn.execute("""INSERT INTO champion_picks (user_id, team, picked_at)
                     VALUES (?,?,datetime('now'))
                     ON CONFLICT(user_id) DO UPDATE SET team=excluded.team, picked_at=excluded.picked_at""",
@@ -491,8 +496,27 @@ def champion_admin(body: ChampionCfgIn, user=Depends(require_admin)):
         cfg["points"] = body.points
     if body.champion_team is not None:
         cfg["champion_team"] = body.champion_team or None
+    if body.teams is not None:
+        seen, clean = set(), []
+        for n in body.teams:
+            n = (n or "").strip()
+            if n and n not in seen:
+                seen.add(n)
+                clean.append(n)
+        cfg["teams"] = clean
     conn.execute("INSERT INTO settings (key, value) VALUES ('champion', ?) "
                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(cfg),))
+    # if the pickable list changed while betting is still open, drop picks whose
+    # team was removed (e.g. lost in the Round of 16) so those users re-pick
+    removed = 0
+    if body.teams is not None and not cfg["champion_team"]:
+        pool = cfg["teams"]
+        if pool:
+            ph = ",".join("?" * len(pool))
+            cur = conn.execute(f"DELETE FROM champion_picks WHERE team NOT IN ({ph})", pool)
+        else:
+            cur = conn.execute("DELETE FROM champion_picks")
+        removed = cur.rowcount
     # (re)award the bonus: correct picks get cfg points, everyone else 0;
     # clearing the champion resets points to NULL (undecided)
     awarded = 0
@@ -504,7 +528,7 @@ def champion_admin(body: ChampionCfgIn, user=Depends(require_admin)):
         conn.execute("UPDATE champion_picks SET points = NULL")
     conn.commit()
     conn.close()
-    return {"ok": True, **cfg, "awarded": awarded}
+    return {"ok": True, **cfg, "awarded": awarded, "removed": removed}
 
 # ─── Admin: user management (self-registration disabled) ─────
 @app.get("/admin/users")
