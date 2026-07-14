@@ -41,7 +41,7 @@
   // Must match the ?v= query on this file in index.html and APP_BUILD on the
   // server. If the server reports a newer build, the client reloads once to
   // pull the fresh entry point (see reloadAll).
-  const BUILD = '13';
+  const BUILD = '14';
 
   // ── api: try network, fall back to demo ──────────────────────────
   function enterDemo() {
@@ -144,6 +144,11 @@
     const ab = STAGE_ABBR[stage] || stage;
     const cls = stage === 'The Final' ? 'stage-final' : (stage === 'Group Stage' ? 'stage-group' : 'stage-ko');
     return `<span class="stage-badge ${cls}">${esc(ab)}</span>`;
+  }
+  // point-multiplier badge — only shown for boosted matches (x2 / x4)
+  function multBadge(m) {
+    const x = +(m && m.multiplier) || 1;
+    return x > 1 ? `<span class="mult-badge">×${x}</span>` : '';
   }
 
   // points → badge
@@ -290,7 +295,7 @@
     const finished = S.mine.filter((p) => p.status === 'finished' && p.points != null)
       .sort((a, b) => (b.kickoff_time || '').localeCompare(a.kickoff_time || ''));
     let streak = 0;
-    for (const p of finished) { if (p.points >= 1.5) streak++; else break; }
+    for (const p of finished) { if (p.points >= 1.5 * (+p.multiplier || 1)) streak++; else break; }
     // spread overall for any legacy callers expecting flat {rank,pts,wins}
     return { ...overall, overall, knockout, streak, total: S.mine.length };
   }
@@ -427,7 +432,7 @@
     return `
       <div class="match ${finished ? 'is-finished' : ''}">
         <div class="match-top">
-          <span class="ko">${stageBadge(m.stage)} 🗓 ${fmtKO(m.kickoff_time)}</span>
+          <span class="ko">${stageBadge(m.stage)}${multBadge(m)} 🗓 ${fmtKO(m.kickoff_time)}</span>
           ${chip(st)}
         </div>
         <div class="fixture">
@@ -608,7 +613,7 @@
     const rows = [...S.mine].sort((a, b) => koDate(b.kickoff_time) - koDate(a.kickoff_time));
     const fin = rows.filter((p) => p.status === 'finished' && p.points != null);
     const total = fin.reduce((s, p) => s + p.points, 0);
-    const wins = fin.filter((p) => p.points >= 2).length;
+    const wins = fin.filter((p) => p.points === 2 * (+p.multiplier || 1)).length;
     $('histSummary').innerHTML = rows.length ? `
       <div class="mecard" style="margin-bottom:16px">
         <div class="me-stats" style="margin-top:0">
@@ -652,7 +657,7 @@
         <span class="r-score">${m.score_home}<i>–</i>${m.score_away}</span>
         <span class="r-team r-a"><b>${esc(m.team_away)}</b>${flag(m.team_away, m.team_away_flag)}</span>
       </div>
-      ${you}
+      <div class="r-right">${multBadge(m)}${you}</div>
     </div>`;
   }
 
@@ -763,6 +768,7 @@
         handicap_team: S.hdcpTeam,
         handicap_value: parseFloat($('amHdcpVal').value),
         kickoff_time: ko.length === 16 ? ko + ':00' : ko,
+        multiplier: parseInt($('amMult').value, 10) || 1,
       }});
       toast('เพิ่มนัดแล้ว ✓');
       if (ev.target && typeof ev.target.reset === 'function') ev.target.reset();
@@ -910,11 +916,12 @@
         `<button class="btn btn-sm ${m.locked ? 'btn-gold' : 'btn-ghost'}" onclick="App.toggleLock(${m.id}, ${m.locked ? 0 : 1})" title="${m.locked ? 'เปิดรับทายอีกครั้ง' : 'ปิดรับทายทันที'}">${m.locked ? '🔓 เปิดรับ' : '🔒 ปิดรับ'}</button>`;
       return `<div class="admin-match">
         <div class="am-top">
-          <span class="am-fixt">${stageBadge(m.stage)} ${flag(m.team_home, m.team_home_flag)} ${esc(m.team_home)} <span class="faint">vs</span> ${esc(m.team_away)} ${flag(m.team_away, m.team_away_flag)}</span>
+          <span class="am-fixt">${stageBadge(m.stage)}${multBadge(m)} ${flag(m.team_home, m.team_home_flag)} ${esc(m.team_home)} <span class="faint">vs</span> ${esc(m.team_away)} ${flag(m.team_away, m.team_away_flag)}</span>
           ${chip(st)}
         </div>
         <div class="faint" style="font-size:11px;margin-bottom:9px">🗓 ${fmtKO(m.kickoff_time)} · <span id="hdcp${m.id}">⚖️ ${esc(m.handicap_team)} ${m.handicap_value} <button class="lnk-edit" onclick="App.editHandicap(${m.id})" title="แก้ราคา handicap">✏️ แก้ราคา</button></span></div>
         <div class="faint" style="font-size:11px;margin:-4px 0 9px"><span id="stg${m.id}">🏆 รอบ: ${esc(m.stage)} <button class="lnk-edit" onclick="App.editStage(${m.id})" title="แก้รอบการแข่งขัน">✏️ แก้รอบ</button></span></div>
+        <div class="faint" style="font-size:11px;margin:-4px 0 9px"><span id="mult${m.id}">✖️ ตัวคูณ: ×${(+m.multiplier || 1)} <button class="lnk-edit" onclick="App.editMult(${m.id})" title="แก้ตัวคูณคะแนน">✏️ แก้ตัวคูณ</button></span></div>
         ${fin ? '' : `<div class="faint" style="font-size:11px;margin:-4px 0 9px">${apiMapHtml(m)}</div>`}
         <div class="am-form">
           <input class="in" id="rh${m.id}" type="number" min="0" placeholder="0" value="${fin ? m.score_home : ''}">
@@ -1255,6 +1262,28 @@
     } catch (e) { toast(e.detail || 'อัปเดตรอบไม่สำเร็จ', true); }
   }
 
+  // ── admin: edit the point multiplier (recomputes if already scored) ─
+  function editMult(id) {
+    const m = S.matches.find((x) => x.id === id);
+    if (!m) return;
+    const box = $('mult' + id);
+    if (!box) return;
+    const cur = +m.multiplier || 1;
+    const opt = (v) => `<option value="${v}" ${cur === v ? 'selected' : ''}>×${v}</option>`;
+    box.innerHTML = `✖️ ตัวคูณ:
+      <select class="in in-mini" id="emu${id}">${opt(1)}${opt(2)}${opt(4)}</select>
+      <button class="btn btn-gold btn-sm" onclick="App.saveMult(${id})">✓</button>
+      <button class="btn btn-ghost btn-sm" onclick="App.renderAdmin()">✕</button>`;
+  }
+  async function saveMult(id) {
+    const multiplier = parseInt($('emu' + id).value, 10) || 1;
+    try {
+      const r = await api('PUT', '/matches/' + id, { body: { multiplier } });
+      toast(r.recomputed ? `อัปเดตตัวคูณ ×${multiplier} · คิดคะแนนใหม่ ${r.recomputed} รายการ ✓` : `อัปเดตตัวคูณ ×${multiplier} แล้ว ✓`);
+      await reloadAll();
+    } catch (e) { toast(e.detail || 'อัปเดตตัวคูณไม่สำเร็จ', true); }
+  }
+
   async function setResult(id) {
     const h = $('rh' + id).value, a = $('ra' + id).value;
     if (h === '' || a === '') { toast('กรอกสกอร์ให้ครบ', true); return; }
@@ -1297,7 +1326,7 @@
     doLogin, logout,
     go, predict, addMatch, setResult, delMatch, setHdcp, refreshHdcpSel,
     onTeamInput, onFlagInput, toggleLock,
-    saveLiveScores, fetchScores, loadApiFixtures, mapFixture, editHandicap, saveHandicap, editStage, saveStage, renderAdmin,
+    saveLiveScores, fetchScores, loadApiFixtures, mapFixture, editHandicap, saveHandicap, editStage, saveStage, editMult, saveMult, renderAdmin,
     pickChampion, saveChampCfg, declareChampion, clearChampion, addChampTeam, removeChampTeam,
     saveDisplaySettings,
     createUser, delUser, editUser, saveTeam, delTeam, editTeam, updateTeamPrev,
