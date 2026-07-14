@@ -24,6 +24,8 @@
     else s = scoreLine(rawDiff, hv);
     return predictedWinner === ht ? s : 2 - s;
   }
+  const normMult = (m) => ([1, 2, 4].includes(+m) ? +m : 1);
+  function scoredPoints(m, predictedWinner) { return calcPoints(m, predictedWinner) * normMult(m.multiplier); }
 
   // ── team registry (pre-defined flags) ──────────────────────────────
   const TEAM_SEED = [
@@ -96,7 +98,7 @@
 
   function pred(userId, m, winner) {
     const p = { id: pid++, user_id: userId, match_id: m.id, predicted_winner: winner, points: null };
-    if (m.status === 'finished') p.points = calcPoints(m, winner);
+    if (m.status === 'finished') p.points = scoredPoints(m, winner);
     predictions.push(p);
   }
   const U = (uname) => users.find((u) => u.username === uname).id;
@@ -128,7 +130,7 @@
       return { ...p, team_home: m.team_home, team_away: m.team_away, team_home_flag: m.team_home_flag,
         team_away_flag: m.team_away_flag, stage: m.stage, handicap_team: m.handicap_team,
         handicap_value: m.handicap_value, kickoff_time: m.kickoff_time, score_home: m.score_home,
-        score_away: m.score_away, status: m.status, locked: m.locked };
+        score_away: m.score_away, status: m.status, locked: m.locked, multiplier: m.multiplier };
     }).sort((a, b) => (a.kickoff_time || '').localeCompare(b.kickoff_time || ''));
   }
 
@@ -145,7 +147,7 @@
       mine.forEach((p) => {
         const m = matches.find((x) => x.id === p.match_id);
         if (p.points != null) total += p.points;
-        if (p.points === 2) wins++;
+        if (m && p.points === 2 * normMult(m.multiplier)) wins++;
         if (m && m.status === 'finished') finished++;
       });
       if (phase !== 'group') {   // champion-pick bonus counts on knockout/overall boards
@@ -165,7 +167,7 @@
     const tables = {
       users: () => users.map((u) => ({ id: u.id, username: u.username, display_name: u.display_name, is_admin: u.is_admin, knockout_eligible: u.knockout_eligible })),
       teams: () => teams.map((t) => ({ id: t.id, name: t.name, flag: t.flag })),
-      matches: () => matches.map((m) => ({ id: m.id, team_home: m.team_home, team_away: m.team_away, stage: m.stage, handicap_team: m.handicap_team, handicap_value: m.handicap_value, kickoff_time: m.kickoff_time, score_home: m.score_home, score_away: m.score_away, status: m.status, locked: m.locked })),
+      matches: () => matches.map((m) => ({ id: m.id, team_home: m.team_home, team_away: m.team_away, stage: m.stage, handicap_team: m.handicap_team, handicap_value: m.handicap_value, kickoff_time: m.kickoff_time, score_home: m.score_home, score_away: m.score_away, status: m.status, locked: m.locked, multiplier: m.multiplier })),
       predictions: () => predictions.map((p) => ({ id: p.id, user_id: p.user_id, match_id: p.match_id, predicted_winner: p.predicted_winner, points: p.points })),
       leaderboard: () => leaderboardRows(),
     };
@@ -325,7 +327,8 @@
         team_home_flag: body.team_home_flag || regFlag(body.team_home),
         team_away_flag: body.team_away_flag || regFlag(body.team_away),
         stage: body.stage || 'Group Stage', handicap_team: body.handicap_team,
-        handicap_value: body.handicap_value, kickoff_time: body.kickoff_time });
+        handicap_value: body.handicap_value, kickoff_time: body.kickoff_time,
+        multiplier: normMult(body.multiplier) });
       return ok({ ok: true });
     }
     if (method === 'DELETE' && path.startsWith('/matches/')) {
@@ -340,7 +343,7 @@
       if (!m) return err(404, 'ไม่พบนัด');
       m.score_home = body.score_home; m.score_away = body.score_away; m.status = 'finished'; m.locked = 1;
       const ps = predictions.filter((p) => p.match_id === m.id);
-      ps.forEach((p) => { p.points = calcPoints(m, p.predicted_winner); });
+      ps.forEach((p) => { p.points = scoredPoints(m, p.predicted_winner); });
       return ok({ ok: true, updated: ps.length });
     }
     if (method === 'POST' && path === '/admin/lock') {
@@ -359,7 +362,7 @@
         if (!m) return;
         m.score_home = it.score_home; m.score_away = it.score_away;
         m.status = it.final ? 'finished' : 'live'; m.locked = 1;
-        predictions.filter((p) => p.match_id === m.id).forEach((p) => { p.points = calcPoints(m, p.predicted_winner); });
+        predictions.filter((p) => p.match_id === m.id).forEach((p) => { p.points = scoredPoints(m, p.predicted_winner); });
         count++;
       });
       return ok({ ok: true, matches: count, detail: [] });
@@ -368,12 +371,12 @@
       const id = parseInt(path.split('/')[2], 10);
       const m = matches.find((x) => x.id === id);
       if (!m) return err(404, 'ไม่พบนัด');
-      ['handicap_team', 'handicap_value', 'kickoff_time', 'stage'].forEach((c) => {
-        if (body[c] != null) m[c] = c === 'handicap_value' ? Number(body[c]) : body[c];
+      ['handicap_team', 'handicap_value', 'kickoff_time', 'stage', 'multiplier'].forEach((c) => {
+        if (body[c] != null) m[c] = c === 'handicap_value' ? Number(body[c]) : (c === 'multiplier' ? normMult(body[c]) : body[c]);
       });
       let recomputed = 0;
       if (m.score_home != null && m.score_away != null)
-        predictions.filter((p) => p.match_id === m.id).forEach((p) => { p.points = calcPoints(m, p.predicted_winner); recomputed++; });
+        predictions.filter((p) => p.match_id === m.id).forEach((p) => { p.points = scoredPoints(m, p.predicted_winner); recomputed++; });
       return ok({ ok: true, recomputed });
     }
     if (method === 'POST' && path === '/admin/query') return runQuery(body.sql);
@@ -381,7 +384,7 @@
       const EDIT = {
         users: ['display_name', 'username', 'is_admin', 'knockout_eligible'],
         teams: ['name', 'flag'],
-        matches: ['team_home', 'team_away', 'team_home_flag', 'team_away_flag', 'stage', 'handicap_team', 'handicap_value', 'kickoff_time', 'score_home', 'score_away', 'status', 'locked'],
+        matches: ['team_home', 'team_away', 'team_home_flag', 'team_away_flag', 'stage', 'handicap_team', 'handicap_value', 'kickoff_time', 'score_home', 'score_away', 'status', 'locked', 'multiplier'],
         predictions: ['predicted_winner', 'points'],
       };
       const arrs = { users, teams, matches, predictions };
@@ -390,7 +393,7 @@
       const row = arrs[body.table].find((x) => x.id === body.id);
       if (!row) return err(404, 'ไม่พบแถว');
       let v = body.value;
-      if (['handicap_value', 'score_home', 'score_away', 'points', 'locked', 'is_admin', 'knockout_eligible'].includes(body.column))
+      if (['handicap_value', 'score_home', 'score_away', 'points', 'locked', 'is_admin', 'knockout_eligible', 'multiplier'].includes(body.column))
         v = v === '' || v == null ? null : Number(v);
       row[body.column] = v;
       return ok({ ok: true });

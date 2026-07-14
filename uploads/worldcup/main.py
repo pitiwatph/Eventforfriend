@@ -34,7 +34,7 @@ DEFAULT_DISPLAY_SETTINGS = {"home_stats": list(HOME_STAT_KEYS), "lb_tabs": list(
 # Bumped every deploy IN LOCKSTEP with the ?v= asset query in index.html and the
 # BUILD constant in app.js. The client compares this to its own build and force-
 # reloads once when they differ, so a stale cached bundle self-heals.
-APP_BUILD = "13"
+APP_BUILD = "14"
 
 # Champion prediction: pick one team (from an admin-managed shortlist) to win
 # the title before the deadline (Bangkok time). Correct pick = bonus points on
@@ -100,6 +100,7 @@ def init_db():
             score_away INTEGER,
             status TEXT DEFAULT 'upcoming',
             locked INTEGER DEFAULT 0,
+            multiplier INTEGER DEFAULT 1,
             created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS predictions (
@@ -134,7 +135,7 @@ def init_db():
     cols = {r["name"] for r in c.execute("PRAGMA table_info(matches)").fetchall()}
     for col, ddl in [("team_home_flag", "TEXT DEFAULT ''"), ("team_away_flag", "TEXT DEFAULT ''"),
                      ("stage", "TEXT DEFAULT 'Group Stage'"), ("locked", "INTEGER DEFAULT 0"),
-                     ("apifootball_fixture_id", "INTEGER")]:
+                     ("apifootball_fixture_id", "INTEGER"), ("multiplier", "INTEGER DEFAULT 1")]:
         if col not in cols:
             c.execute(f"ALTER TABLE matches ADD COLUMN {col} {ddl}")
     user_cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
@@ -215,12 +216,14 @@ class MatchIn(BaseModel):
     handicap_team: str
     handicap_value: float
     kickoff_time: str
+    multiplier: int = 1
 
 class MatchEditIn(BaseModel):
     handicap_team: Optional[str] = None
     handicap_value: Optional[float] = None
     kickoff_time: Optional[str] = None
     stage: Optional[str] = None
+    multiplier: Optional[int] = None
 
 class PredictionIn(BaseModel):
     match_id: int
@@ -292,6 +295,19 @@ def calc_points(match: dict, predicted_winner: str) -> float:
 
     return s if predicted_winner == ht else 2.0 - s
 
+ALLOWED_MULTIPLIERS = (1, 2, 4)
+def norm_multiplier(m) -> int:
+    """Clamp a match multiplier to an allowed value; anything odd falls back to 1."""
+    try:
+        m = int(m)
+    except (TypeError, ValueError):
+        return 1
+    return m if m in ALLOWED_MULTIPLIERS else 1
+
+def scored_points(match: dict, predicted_winner: str) -> float:
+    """Base scoring × the match's point multiplier (x1/x2/x4)."""
+    return calc_points(match, predicted_winner) * norm_multiplier(match.get("multiplier", 1))
+
 def default_pick(match: dict) -> str:
     """System default team for a match — mirrors the frontend rule:
     the handicap team when there's a line, otherwise the home (left) team."""
@@ -331,7 +347,7 @@ def apply_result(conn, match: dict, score_home: int, score_away: int, final: boo
     preds = conn.execute("SELECT * FROM predictions WHERE match_id=?", (match["id"],)).fetchall()
     for p in preds:
         conn.execute("UPDATE predictions SET points=? WHERE id=?",
-                     (calc_points(scored, p["predicted_winner"]), p["id"]))
+                     (scored_points(scored, p["predicted_winner"]), p["id"]))
     return len(preds)
 
 # ─── Endpoints ───────────────────────────────────────────────
@@ -626,9 +642,10 @@ def add_match(body: MatchIn, user=Depends(require_admin)):
     hf = reg_flag(body.team_home, body.team_home_flag)
     af = reg_flag(body.team_away, body.team_away_flag)
     conn.execute("""INSERT INTO matches
-        (team_home,team_away,team_home_flag,team_away_flag,stage,handicap_team,handicap_value,kickoff_time)
-        VALUES (?,?,?,?,?,?,?,?)""",
-        (body.team_home, body.team_away, hf, af, body.stage, body.handicap_team, body.handicap_value, body.kickoff_time))
+        (team_home,team_away,team_home_flag,team_away_flag,stage,handicap_team,handicap_value,kickoff_time,multiplier)
+        VALUES (?,?,?,?,?,?,?,?,?)""",
+        (body.team_home, body.team_away, hf, af, body.stage, body.handicap_team, body.handicap_value,
+         body.kickoff_time, norm_multiplier(body.multiplier)))
     conn.commit()
     conn.close()
     return {"ok": True}
@@ -652,8 +669,10 @@ def edit_match(match_id: int, body: MatchEditIn, user=Depends(require_admin)):
         conn.close()
         raise HTTPException(status_code=404, detail="ไม่พบนัด")
     match = dict(match)
-    fields = {c: getattr(body, c) for c in ("handicap_team", "handicap_value", "kickoff_time", "stage")
+    fields = {c: getattr(body, c) for c in ("handicap_team", "handicap_value", "kickoff_time", "stage", "multiplier")
               if getattr(body, c) is not None}
+    if "multiplier" in fields:
+        fields["multiplier"] = norm_multiplier(fields["multiplier"])
     if fields:
         sets = ", ".join(f"{c}=?" for c in fields)
         conn.execute(f"UPDATE matches SET {sets} WHERE id=?", (*fields.values(), match_id))
@@ -664,7 +683,7 @@ def edit_match(match_id: int, body: MatchEditIn, user=Depends(require_admin)):
         preds = conn.execute("SELECT * FROM predictions WHERE match_id=?", (match_id,)).fetchall()
         for p in preds:
             conn.execute("UPDATE predictions SET points=? WHERE id=?",
-                         (calc_points(new_match, p["predicted_winner"]), p["id"]))
+                         (scored_points(new_match, p["predicted_winner"]), p["id"]))
         recomputed = len(preds)
     conn.commit()
     conn.close()
@@ -677,7 +696,7 @@ def my_predictions(user=Depends(get_current_user)):
     rows = conn.execute("""
         SELECT p.*, m.team_home, m.team_away, m.team_home_flag, m.team_away_flag, m.stage,
                m.handicap_team, m.handicap_value, m.kickoff_time, m.score_home, m.score_away,
-               m.status, m.locked
+               m.status, m.locked, m.multiplier
         FROM predictions p JOIN matches m ON p.match_id=m.id
         WHERE p.user_id=? ORDER BY m.kickoff_time
     """, (user["id"],)).fetchall()
@@ -1064,7 +1083,7 @@ _EDITABLE = {
     "users": {"display_name", "username", "is_admin", "knockout_eligible"},
     "teams": {"name", "flag"},
     "matches": {"team_home", "team_away", "team_home_flag", "team_away_flag", "stage",
-                "handicap_team", "handicap_value", "kickoff_time", "score_home", "score_away", "status", "locked"},
+                "handicap_team", "handicap_value", "kickoff_time", "score_home", "score_away", "status", "locked", "multiplier"},
     "predictions": {"predicted_winner", "points"},
 }
 
@@ -1103,7 +1122,7 @@ def leaderboard(phase: str = "overall", user=Depends(get_current_user)):
         SELECT u.display_name, u.username,
                COALESCE(SUM(CASE WHEN {cond} THEN p.points END),0) + {champ_bonus} as total_points,
                COUNT(CASE WHEN {cond} THEN p.id END) as total_predictions,
-               COUNT(CASE WHEN {cond} AND p.points=2 THEN 1 END) as wins,
+               COUNT(CASE WHEN {cond} AND p.points = 2 * COALESCE(m.multiplier,1) THEN 1 END) as wins,
                COUNT(CASE WHEN {cond} AND m.status='finished' THEN 1 END) as finished
         FROM users u
         LEFT JOIN predictions p ON u.id=p.user_id
