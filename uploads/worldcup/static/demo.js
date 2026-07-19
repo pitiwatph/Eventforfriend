@@ -67,7 +67,7 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:00`;
   }
   function addMatch(o) {
-    const m = { id: mid++, status: 'upcoming', locked: 0, score_home: null, score_away: null,
+    const m = { id: mid++, status: 'upcoming', locked: 0, force_open: 0, score_home: null, score_away: null,
       team_home_flag: '', team_away_flag: '', stage: 'Group Stage', ...o };
     if (!m.team_home_flag) m.team_home_flag = regFlag(m.team_home);
     if (!m.team_away_flag) m.team_away_flag = regFlag(m.team_away);
@@ -130,7 +130,7 @@
       return { ...p, team_home: m.team_home, team_away: m.team_away, team_home_flag: m.team_home_flag,
         team_away_flag: m.team_away_flag, stage: m.stage, handicap_team: m.handicap_team,
         handicap_value: m.handicap_value, kickoff_time: m.kickoff_time, score_home: m.score_home,
-        score_away: m.score_away, status: m.status, locked: m.locked, multiplier: m.multiplier };
+        score_away: m.score_away, status: m.status, locked: m.locked, force_open: m.force_open, multiplier: m.multiplier };
     }).sort((a, b) => (a.kickoff_time || '').localeCompare(b.kickoff_time || ''));
   }
 
@@ -167,7 +167,7 @@
     const tables = {
       users: () => users.map((u) => ({ id: u.id, username: u.username, display_name: u.display_name, is_admin: u.is_admin, knockout_eligible: u.knockout_eligible })),
       teams: () => teams.map((t) => ({ id: t.id, name: t.name, flag: t.flag })),
-      matches: () => matches.map((m) => ({ id: m.id, team_home: m.team_home, team_away: m.team_away, stage: m.stage, handicap_team: m.handicap_team, handicap_value: m.handicap_value, kickoff_time: m.kickoff_time, score_home: m.score_home, score_away: m.score_away, status: m.status, locked: m.locked, multiplier: m.multiplier })),
+      matches: () => matches.map((m) => ({ id: m.id, team_home: m.team_home, team_away: m.team_away, stage: m.stage, handicap_team: m.handicap_team, handicap_value: m.handicap_value, kickoff_time: m.kickoff_time, score_home: m.score_home, score_away: m.score_away, status: m.status, locked: m.locked, force_open: m.force_open, multiplier: m.multiplier })),
       predictions: () => predictions.map((p) => ({ id: p.id, user_id: p.user_id, match_id: p.match_id, predicted_winner: p.predicted_winner, points: p.points })),
       leaderboard: () => leaderboardRows(),
     };
@@ -239,9 +239,12 @@
       const m = matches.find((x) => x.id === body.match_id);
       if (!m) return err(404, 'ไม่พบนัดนี้');
       if (m.stage !== 'Group Stage' && !me.knockout_eligible) return err(403, 'คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้');
-      if (m.locked) return err(400, 'แอดมินปิดรับการทายนัดนี้แล้ว');
-      if (m.status !== 'upcoming') return err(400, 'นัดนี้เริ่มไปแล้ว');
-      if (Date.now() >= new Date(m.kickoff_time).getTime() - 30 * MIN) return err(400, 'หมดเวลาทาย (ต้องส่งก่อน Kickoff 30 นาที)');
+      if (m.status === 'finished') return err(400, 'นัดนี้จบไปแล้ว');
+      if (!m.force_open) {  // admin force-open bypasses lock/live/cutoff
+        if (m.locked) return err(400, 'แอดมินปิดรับการทายนัดนี้แล้ว');
+        if (m.status !== 'upcoming') return err(400, 'นัดนี้เริ่มไปแล้ว');
+        if (Date.now() >= new Date(m.kickoff_time).getTime() - 30 * MIN) return err(400, 'หมดเวลาทาย (ต้องส่งก่อน Kickoff 30 นาที)');
+      }
       const ex = predictions.find((p) => p.user_id === me.id && p.match_id === body.match_id);
       if (ex) ex.predicted_winner = body.predicted_winner;
       else predictions.push({ id: pid++, user_id: me.id, match_id: body.match_id, predicted_winner: body.predicted_winner, points: null });
@@ -348,7 +351,7 @@
     }
     if (method === 'POST' && path === '/admin/lock') {
       const m = matches.find((x) => x.id === body.match_id);
-      if (m) m.locked = body.locked ? 1 : 0;
+      if (m) { if (body.locked) { m.locked = 1; m.force_open = 0; } else { m.locked = 0; m.force_open = 1; } }
       return ok({ ok: true });
     }
     if (method === 'GET' && path === '/admin/fetch_scores') {
@@ -384,7 +387,7 @@
       const EDIT = {
         users: ['display_name', 'username', 'is_admin', 'knockout_eligible'],
         teams: ['name', 'flag'],
-        matches: ['team_home', 'team_away', 'team_home_flag', 'team_away_flag', 'stage', 'handicap_team', 'handicap_value', 'kickoff_time', 'score_home', 'score_away', 'status', 'locked', 'multiplier'],
+        matches: ['team_home', 'team_away', 'team_home_flag', 'team_away_flag', 'stage', 'handicap_team', 'handicap_value', 'kickoff_time', 'score_home', 'score_away', 'status', 'locked', 'force_open', 'multiplier'],
         predictions: ['predicted_winner', 'points'],
       };
       const arrs = { users, teams, matches, predictions };
@@ -393,7 +396,7 @@
       const row = arrs[body.table].find((x) => x.id === body.id);
       if (!row) return err(404, 'ไม่พบแถว');
       let v = body.value;
-      if (['handicap_value', 'score_home', 'score_away', 'points', 'locked', 'is_admin', 'knockout_eligible', 'multiplier'].includes(body.column))
+      if (['handicap_value', 'score_home', 'score_away', 'points', 'locked', 'force_open', 'is_admin', 'knockout_eligible', 'multiplier'].includes(body.column))
         v = v === '' || v == null ? null : Number(v);
       row[body.column] = v;
       return ok({ ok: true });

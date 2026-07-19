@@ -41,7 +41,7 @@
   // Must match the ?v= query on this file in index.html and APP_BUILD on the
   // server. If the server reports a newer build, the client reloads once to
   // pull the fresh entry point (see reloadAll).
-  const BUILD = '14';
+  const BUILD = '15';
 
   // ── api: try network, fall back to demo ──────────────────────────
   function enterDemo() {
@@ -113,11 +113,14 @@
   const CUTOFF_MS = 30 * 60 * 1000;
   function matchState(m) {
     if (m.status === 'finished') return 'finished';
+    // admin force-open is authoritative: re-opens betting past the cutoff and
+    // even while LIVE (only a finished match, above, can't be re-opened).
+    if (m.force_open) return 'open';
     const ko = koDate(m.kickoff_time).getTime();
     const now = Date.now();
+    if (m.locked) return 'closed';                  // admin manually closed betting
     if (m.status === 'live') return 'live';         // backend marked in-progress
     if (now >= ko) return 'live';                   // kicked off
-    if (m.locked) return 'closed';                  // admin manually closed betting
     if (now >= ko - CUTOFF_MS) return 'locked';    // within 30-min cutoff
     return 'open';
   }
@@ -912,8 +915,12 @@
     host.innerHTML = sorted.map((m) => {
       const st = matchState(m);
       const fin = m.status === 'finished';
+      // button reflects the EFFECTIVE betting state, not just the raw locked flag —
+      // so re-opening works even after the cutoff / once the match is LIVE.
+      const bettingOpen = st === 'open';
+      const forced = !!m.force_open && bettingOpen;
       const lockBtn = fin ? '' :
-        `<button class="btn btn-sm ${m.locked ? 'btn-gold' : 'btn-ghost'}" onclick="App.toggleLock(${m.id}, ${m.locked ? 0 : 1})" title="${m.locked ? 'เปิดรับทายอีกครั้ง' : 'ปิดรับทายทันที'}">${m.locked ? '🔓 เปิดรับ' : '🔒 ปิดรับ'}</button>`;
+        `<button class="btn btn-sm ${bettingOpen ? 'btn-ghost' : 'btn-gold'}" onclick="App.toggleLock(${m.id}, ${bettingOpen ? 1 : 0})" title="${bettingOpen ? 'ปิดรับทายทันที' : 'เปิดรับทายอีกครั้ง (ข้ามเวลา/LIVE)'}">${bettingOpen ? '🔒 ปิดรับ' : '🔓 เปิดรับ'}</button>${forced ? ' <span class="faint" style="font-size:10px">· เปิดโดยแอดมิน</span>' : ''}`;
       return `<div class="admin-match">
         <div class="am-top">
           <span class="am-fixt">${stageBadge(m.stage)}${multBadge(m)} ${flag(m.team_home, m.team_home_flag)} ${esc(m.team_home)} <span class="faint">vs</span> ${esc(m.team_away)} ${flag(m.team_away, m.team_away_flag)}</span>

@@ -34,7 +34,7 @@ DEFAULT_DISPLAY_SETTINGS = {"home_stats": list(HOME_STAT_KEYS), "lb_tabs": list(
 # Bumped every deploy IN LOCKSTEP with the ?v= asset query in index.html and the
 # BUILD constant in app.js. The client compares this to its own build and force-
 # reloads once when they differ, so a stale cached bundle self-heals.
-APP_BUILD = "14"
+APP_BUILD = "15"
 
 # Champion prediction: pick one team (from an admin-managed shortlist) to win
 # the title before the deadline (Bangkok time). Correct pick = bonus points on
@@ -100,6 +100,7 @@ def init_db():
             score_away INTEGER,
             status TEXT DEFAULT 'upcoming',
             locked INTEGER DEFAULT 0,
+            force_open INTEGER DEFAULT 0,
             multiplier INTEGER DEFAULT 1,
             created_at TEXT DEFAULT (datetime('now'))
         );
@@ -135,7 +136,8 @@ def init_db():
     cols = {r["name"] for r in c.execute("PRAGMA table_info(matches)").fetchall()}
     for col, ddl in [("team_home_flag", "TEXT DEFAULT ''"), ("team_away_flag", "TEXT DEFAULT ''"),
                      ("stage", "TEXT DEFAULT 'Group Stage'"), ("locked", "INTEGER DEFAULT 0"),
-                     ("apifootball_fixture_id", "INTEGER"), ("multiplier", "INTEGER DEFAULT 1")]:
+                     ("apifootball_fixture_id", "INTEGER"), ("multiplier", "INTEGER DEFAULT 1"),
+                     ("force_open", "INTEGER DEFAULT 0")]:
         if col not in cols:
             c.execute(f"ALTER TABLE matches ADD COLUMN {col} {ddl}")
     user_cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
@@ -696,7 +698,7 @@ def my_predictions(user=Depends(get_current_user)):
     rows = conn.execute("""
         SELECT p.*, m.team_home, m.team_away, m.team_home_flag, m.team_away_flag, m.stage,
                m.handicap_team, m.handicap_value, m.kickoff_time, m.score_home, m.score_away,
-               m.status, m.locked, m.multiplier
+               m.status, m.locked, m.force_open, m.multiplier
         FROM predictions p JOIN matches m ON p.match_id=m.id
         WHERE p.user_id=? ORDER BY m.kickoff_time
     """, (user["id"],)).fetchall()
@@ -714,16 +716,24 @@ def submit_prediction(body: PredictionIn, user=Depends(get_current_user)):
     if match.get("stage") != "Group Stage" and not user["knockout_eligible"]:
         conn.close()
         raise HTTPException(status_code=403, detail="คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้")
-    if match.get("locked"):
+    # A result has been entered → betting is permanently closed, no override.
+    if match["status"] == "finished":
         conn.close()
-        raise HTTPException(status_code=400, detail="แอดมินปิดรับการทายนัดนี้แล้ว")
-    if match["status"] != "upcoming":
-        conn.close()
-        raise HTTPException(status_code=400, detail="นัดนี้เริ่มไปแล้ว")
-    kickoff = datetime.fromisoformat(match["kickoff_time"])
-    if datetime.utcnow() + timedelta(hours=7) >= kickoff - timedelta(minutes=30):
-        conn.close()
-        raise HTTPException(status_code=400, detail="หมดเวลาทาย (ต้องส่งก่อน Kickoff 30 นาที)")
+        raise HTTPException(status_code=400, detail="นัดนี้จบไปแล้ว")
+    # force_open is the admin's authoritative override: when set it re-opens
+    # betting past the 30-min cutoff and even while the match is LIVE. Only the
+    # automatic gates below apply when it is NOT set.
+    if not match.get("force_open"):
+        if match.get("locked"):
+            conn.close()
+            raise HTTPException(status_code=400, detail="แอดมินปิดรับการทายนัดนี้แล้ว")
+        if match["status"] != "upcoming":
+            conn.close()
+            raise HTTPException(status_code=400, detail="นัดนี้เริ่มไปแล้ว")
+        kickoff = datetime.fromisoformat(match["kickoff_time"])
+        if datetime.utcnow() + timedelta(hours=7) >= kickoff - timedelta(minutes=30):
+            conn.close()
+            raise HTTPException(status_code=400, detail="หมดเวลาทาย (ต้องส่งก่อน Kickoff 30 นาที)")
     try:
         conn.execute("INSERT OR REPLACE INTO predictions (user_id, match_id, predicted_winner) VALUES (?,?,?)",
                      (user["id"], body.match_id, body.predicted_winner))
@@ -1044,12 +1054,15 @@ def _start_poller():
 @app.post("/admin/lock")
 def lock_match(body: LockIn, user=Depends(require_admin)):
     conn = get_db()
-    conn.execute("UPDATE matches SET locked=? WHERE id=?", (1 if body.locked else 0, body.match_id))
     created = 0
     if body.locked:  # betting closed — lock in the default pick for anyone who hasn't bet
+        # clear any force-open override so the manual close actually takes effect
+        conn.execute("UPDATE matches SET locked=1, force_open=0 WHERE id=?", (body.match_id,))
         match = conn.execute("SELECT * FROM matches WHERE id=?", (body.match_id,)).fetchone()
         if match:
             created = ensure_default_predictions(conn, dict(match))
+    else:  # betting re-opened — authoritative override past the cutoff / LIVE gate
+        conn.execute("UPDATE matches SET locked=0, force_open=1 WHERE id=?", (body.match_id,))
     conn.commit()
     conn.close()
     return {"ok": True, "defaults_added": created}
@@ -1083,7 +1096,7 @@ _EDITABLE = {
     "users": {"display_name", "username", "is_admin", "knockout_eligible"},
     "teams": {"name", "flag"},
     "matches": {"team_home", "team_away", "team_home_flag", "team_away_flag", "stage",
-                "handicap_team", "handicap_value", "kickoff_time", "score_home", "score_away", "status", "locked", "multiplier"},
+                "handicap_team", "handicap_value", "kickoff_time", "score_home", "score_away", "status", "locked", "force_open", "multiplier"},
     "predictions": {"predicted_winner", "points"},
 }
 
