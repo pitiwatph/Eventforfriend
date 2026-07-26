@@ -178,12 +178,30 @@ def init_db():
         if col not in mcols:
             c.execute(f"ALTER TABLE matches ADD COLUMN {col} {ddl}")
 
-    # one-time wipe of the previous tournament's event data
+    # One-time changeover to the new event. The previous tournament's data is
+    # ARCHIVED, never dropped: reverting this deploy restores the old code but
+    # could not un-delete rows, so the tables are set aside under _v1 names and
+    # stay on disk. Restoring is then a rename away. Cost is a few KB.
     row = c.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
     if not row or row["value"] != SCHEMA_VERSION:
-        for stmt in ("DROP TABLE IF EXISTS predictions",
-                     "DROP TABLE IF EXISTS champion_picks",
-                     "DELETE FROM bets", "DELETE FROM credit_ledger",
+        def _archive(table):
+            """Move `table` aside to <table>_v1 (kept only on the first pass)."""
+            have = {r["name"] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if table not in have:
+                return
+            if f"{table}_v1" not in have:
+                c.execute(f"ALTER TABLE {table} RENAME TO {table}_v1")
+            else:
+                c.execute(f"DELETE FROM {table}")
+
+        # points-era tables have no counterpart in the new schema
+        _archive("predictions")
+        _archive("champion_picks")
+        # matches carries over, so snapshot it and then clear the live table
+        if not c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='matches_v1'").fetchone():
+            c.execute("CREATE TABLE matches_v1 AS SELECT * FROM matches")
+        for stmt in ("DELETE FROM bets", "DELETE FROM credit_ledger",
                      "DELETE FROM odds_history", "DELETE FROM matches",
                      "DELETE FROM bet_days", "UPDATE users SET credits=0",
                      "DELETE FROM settings WHERE key IN ('display','champion')"):
@@ -193,7 +211,10 @@ def init_db():
                 pass
         c.execute("INSERT INTO settings (key, value) VALUES ('schema_version', ?) "
                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (SCHEMA_VERSION,))
-        print(f"[init] event data reset for {SCHEMA_VERSION} (users & teams kept)", flush=True)
+        kept = [r["name"] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_v1'").fetchall()]
+        print(f"[init] switched to {SCHEMA_VERSION}; users & teams kept; "
+              f"old data archived in {kept or 'nothing (fresh db)'}", flush=True)
 
     # seed the team registry
     if not c.execute("SELECT id FROM teams LIMIT 1").fetchone():
