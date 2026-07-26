@@ -32,6 +32,13 @@ APP_BUILD = "16"
 # to the same moment — after it, the match is frozen for everyone.
 BET_CUTOFF_MIN = int(os.environ.get("BET_CUTOFF_MIN", "10"))
 
+# Every winning bet pays this multiple of the stake, both sides, no water. The
+# handicap line is what balances a fixture; the water was only ever a finer
+# adjustment plus a bookmaker's margin, and neither belongs in a game friends
+# play against each other. Set FLAT_ODDS=0 to price each side individually
+# again — the odds columns and the per-bet odds_taken never went away.
+FLAT_ODDS = float(os.environ.get("FLAT_ODDS", "2.0"))
+
 # Schema generation marker. Bumping this wipes the *event* data (matches, bets,
 # ledger, credits) exactly once on the next boot, so the app can be re-pointed at
 # a new tournament without hand-editing the database. User accounts and the team
@@ -250,6 +257,17 @@ def init_db():
         c.execute("UPDATE matches SET play_date=? WHERE id=?",
                   (_play_date_of(m["kickoff_time"]), m["id"]))
 
+    # Bring unsettled fixtures onto the house price when flat odds are on, so a
+    # card cannot advertise x2 while the row still pays something else. Bets
+    # already placed keep the odds_taken they were struck at.
+    if FLAT_ODDS:
+        moved = c.execute(
+            "UPDATE matches SET odds_home=?, odds_away=? "
+            "WHERE status='upcoming' AND (odds_home != ? OR odds_away != ?)",
+            (FLAT_ODDS, FLAT_ODDS, FLAT_ODDS, FLAT_ODDS)).rowcount
+        if moved:
+            print(f"[init] flat odds x{FLAT_ODDS:g}: repriced {moved} upcoming fixture(s)", flush=True)
+
     conn.commit()
     conn.close()
 
@@ -390,7 +408,14 @@ class MapIn(BaseModel):
 MIN_ODDS, MAX_ODDS = 1.01, 20.0
 
 def norm_odds(v, fallback=1.90) -> float:
-    """Decimal odds: 1.90 means a winning 100 stake returns 190 (profit 90)."""
+    """Decimal odds: 1.90 means a winning 100 stake returns 190 (profit 90).
+
+    With FLAT_ODDS on, whatever is submitted collapses to the one house price,
+    so no path — admin form, odds editor, SQL cell edit — can reintroduce a
+    split price while the mode is active.
+    """
+    if FLAT_ODDS:
+        return FLAT_ODDS
     try:
         v = float(v)
     except (TypeError, ValueError):
@@ -580,7 +605,9 @@ def stages(user=Depends(get_current_user)):
 
 @app.get("/settings")
 def settings(user=Depends(get_current_user)):
-    return {"build": APP_BUILD, "cutoff_min": BET_CUTOFF_MIN}
+    # flat_odds is 0 when each side is priced separately, so the client knows
+    # whether to show a water column at all
+    return {"build": APP_BUILD, "cutoff_min": BET_CUTOFF_MIN, "flat_odds": FLAT_ODDS}
 
 @app.get("/ledger/mine")
 def my_ledger(user=Depends(get_current_user)):
@@ -835,8 +862,11 @@ def update_odds(match_id: int, body: OddsIn, user=Depends(require_admin)):
         raise HTTPException(status_code=400, detail="ปิดรับพนันแล้ว — แก้ราคาไม่ได้")
     ht = body.handicap_team or m["handicap_team"]
     hv = m["handicap_value"] if body.handicap_value is None else float(body.handicap_value)
-    oh = norm_odds(body.odds_home, m["odds_home"]) if body.odds_home is not None else m["odds_home"]
-    oa = norm_odds(body.odds_away, m["odds_away"]) if body.odds_away is not None else m["odds_away"]
+    if FLAT_ODDS:
+        oh = oa = FLAT_ODDS
+    else:
+        oh = norm_odds(body.odds_home, m["odds_home"]) if body.odds_home is not None else m["odds_home"]
+        oa = norm_odds(body.odds_away, m["odds_away"]) if body.odds_away is not None else m["odds_away"]
     conn.execute("UPDATE matches SET handicap_team=?, handicap_value=?, odds_home=?, odds_away=? WHERE id=?",
                  (ht, hv, oh, oa, match_id))
     conn.execute("""INSERT INTO odds_history (match_id, handicap_team, handicap_value, odds_home, odds_away, source)

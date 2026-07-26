@@ -9,6 +9,7 @@
 
   const STAGES = ['Group Stage', 'Semi-finals', 'The Final'];
   const CUTOFF_MIN = 10;
+  const FLAT_ODDS = 2.0;   // 0 = price each side separately
   const BUILD = '16';
 
   // ── faithful port of main.py ah_outcome / payout_for ───────────────
@@ -54,6 +55,7 @@
   let uid = 1, mid = 1, bid = 1, lid = 1;
   const users = [], matches = [], bets = [], ledger = [], betDays = {};
 
+  const FO = FLAT_ODDS || 1.90;
   const pad = (n) => String(n).padStart(2, '0');
   // store kickoffs the way the backend does: naive Bangkok 'YYYY-MM-DDTHH:MM'
   function isoLocal(ts) {
@@ -102,11 +104,11 @@
   ];
 
   // yesterday (settled), today (open), tomorrow (not yet opened)
-  const mYest1 = addMatch('Thailand', 'Cambodia', 'Thailand', 1.5, 1.90, 1.90, now - DAY, 'Group Stage');
-  const mYest2 = addMatch('Vietnam', 'Laos', 'Vietnam', 1.25, 1.85, 1.95, now - DAY + HR, 'Group Stage');
-  const mToday1 = addMatch('Malaysia', 'Singapore', 'Malaysia', 0.25, 1.88, 1.92, now + 3 * HR, 'Group Stage');
-  const mToday2 = addMatch('Indonesia', 'Philippines', 'Indonesia', 0.75, 1.95, 1.85, now + 5 * HR, 'Group Stage');
-  const mTomo = addMatch('Thailand', 'Vietnam', 'Thailand', 0.5, 1.90, 1.90, now + DAY, 'Group Stage');
+  const mYest1 = addMatch('Thailand', 'Cambodia', 'Thailand', 1.5, FO, FO, now - DAY, 'Group Stage');
+  const mYest2 = addMatch('Vietnam', 'Laos', 'Vietnam', 1.25, FO, FO, now - DAY + HR, 'Group Stage');
+  const mToday1 = addMatch('Malaysia', 'Singapore', 'Malaysia', 0.25, FO, FO, now + 3 * HR, 'Group Stage');
+  const mToday2 = addMatch('Indonesia', 'Philippines', 'Indonesia', 0.75, FO, FO, now + 5 * HR, 'Group Stage');
+  const mTomo = addMatch('Thailand', 'Vietnam', 'Thailand', 0.5, FO, FO, now + DAY, 'Group Stage');
 
   betDays[mYest1.play_date] = 'closed';
   betDays[mToday1.play_date] = 'open';
@@ -204,7 +206,7 @@
       return ok({ access_token: tokenOf(u), token_type: 'bearer', display_name: u.display_name, is_admin: u.is_admin });
     }
 
-    if (path === '/settings') return ok({ build: BUILD, cutoff_min: CUTOFF_MIN });
+    if (path === '/settings') return ok({ build: BUILD, cutoff_min: CUTOFF_MIN, flat_odds: FLAT_ODDS });
 
     let g = needAuth(); if (g) return g;
 
@@ -350,7 +352,7 @@
 
     if (path === '/matches' && method === 'POST') {
       const m = addMatch(body.team_home, body.team_away, body.handicap_team, body.handicap_value,
-        Number(body.odds_home) || 1.9, Number(body.odds_away) || 1.9,
+        FLAT_ODDS || Number(body.odds_home) || 1.9, FLAT_ODDS || Number(body.odds_away) || 1.9,
         new Date(body.kickoff_time).getTime(), body.stage);
       return ok({ ok: true, id: m.id });
     }
@@ -360,8 +362,11 @@
       if (oddsFrozen(m)) return err(400, 'ปิดรับพนันแล้ว — แก้ราคาไม่ได้');
       if (body.handicap_team) m.handicap_team = body.handicap_team;
       if (body.handicap_value != null) m.handicap_value = Number(body.handicap_value);
-      if (body.odds_home != null) m.odds_home = Number(body.odds_home);
-      if (body.odds_away != null) m.odds_away = Number(body.odds_away);
+      if (FLAT_ODDS) { m.odds_home = m.odds_away = FLAT_ODDS; }
+      else {
+        if (body.odds_home != null) m.odds_home = Number(body.odds_home);
+        if (body.odds_away != null) m.odds_away = Number(body.odds_away);
+      }
       return ok({ ok: true, ...m });
     }
     if (path.startsWith('/matches/') && method === 'DELETE') {

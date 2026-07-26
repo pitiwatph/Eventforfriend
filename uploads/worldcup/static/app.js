@@ -25,6 +25,7 @@
     pick: {},            // match_id -> side the user has tapped (pre-submit)
     apiFixtures: [],
     cutoffMin: 10,
+    flatOdds: 2,      // 0 = each side priced separately
   };
   const LS = 'wc26_token';
   // Must match the ?v= query on this file in index.html and APP_BUILD on the
@@ -96,6 +97,13 @@
 
   // Decimal odds -> Thai "water". 1.90 => 0.90 (win 90 on a 100 stake).
   const water = (odds) => (Number(odds) - 1).toFixed(2);
+  // How a price reads to a player. On the flat house price there is no water to
+  // quote, so it shows as the multiple you get back instead.
+  const priceLabel = (odds) =>
+    S.flatOdds ? '×' + Number(odds).toFixed(Number(odds) % 1 ? 2 : 0) : water(odds);
+  // ...and the same thing spelled out where a sentence reads better
+  const priceWord = (odds) =>
+    S.flatOdds ? `ชนะได้ ${priceLabel(odds)}` : `น้ำ ${water(odds)}`;
 
   // backend stores kickoff as naive Bangkok local time.
   const koDate = (s) => new Date((s || '').replace(' ', 'T'));
@@ -164,7 +172,9 @@
       logout(); return;
     }
     $('authScreen').style.display = 'none';
-    $('appShell').style.display = 'block';
+    // must be flex, not block: .shell is the column that gives .scroll its
+    // height and keeps the tab bar pinned to the bottom edge
+    $('appShell').style.display = 'flex';
     $('adminTab').style.display = S.me.is_admin ? '' : 'none';
     $('topAvatar').textContent = initials(S.me.display_name);
     await reloadAll();
@@ -184,6 +194,7 @@
         location.reload(); return;
       }
       if (settings && settings.cutoff_min) S.cutoffMin = settings.cutoff_min;
+      if (settings && settings.flat_odds !== undefined) S.flatOdds = Number(settings.flat_odds) || 0;
       S.matches = matches; S.days = days; S.myBets = bets;
       S.leaderboard = lb; S.teams = teams; S.stages = stages;
       S.me = await api('GET', '/me');
@@ -286,7 +297,7 @@
     return `<button class="${cls}" ${dis} onclick="App.pick(${m.id}, ${JSON.stringify(side).replace(/"/g, '&quot;')})">
         <span class="f">${flag(side)}</span>
         <span class="pb-name">${esc(side)}</span>
-        <span class="pb-odds">${water(odds)}</span>
+        <span class="pb-odds">${priceLabel(odds)}</span>
         ${staked ? `<span class="pb-mine">แทงแล้ว ${money(staked)}</span>` : ''}
       </button>`;
   }
@@ -307,7 +318,7 @@
                  placeholder="จำนวนเครดิต" oninput="App.previewStake(${m.id})">
           <button class="btn btn-gold btn-sm" onclick="App.placeBet(${m.id})">แทง ${esc(side)}</button>
         </div>
-        <div class="stake-prev" id="prev-${m.id}">ราคา ${water(odds)} · ชนะได้ —</div>
+        <div class="stake-prev" id="prev-${m.id}">${priceWord(odds)} · ชนะได้ —</div>
       </div>`;
   }
 
@@ -317,7 +328,7 @@
     return `<div class="mybets">${mine.map((b) => `
       <div class="mybet">
         <span class="mb-side">${flag(b.side)} ${esc(b.side)}</span>
-        <span class="mb-terms">${esc(b.hdcp_team_taken)} ${b.line_taken} · น้ำ ${water(b.odds_taken)}</span>
+        <span class="mb-terms">${esc(b.hdcp_team_taken)} ${b.line_taken} · ${priceWord(b.odds_taken)}</span>
         <span class="mb-stake">${money(b.stake)}</span>
         ${b.status === 'open' && m.can_bet
           ? `<button class="lnk-edit" onclick="App.cancelBet(${b.id})">ยกเลิก</button>`
@@ -407,7 +418,7 @@
     const odds = side === m.team_home ? m.odds_home : m.odds_away;
     const stake = Number(inp.value) || 0;
     const win = stake * (Number(odds) - 1);
-    el.innerHTML = `ราคา ${water(odds)} · ชนะได้ <b>${stake ? '+' + money(win) : '—'}</b>`
+    el.innerHTML = `${priceWord(odds)} · ได้คืน <b>${stake ? money(stake + win) : '—'}</b>`
       + (stake > S.me.credits ? ' <span class="over">เครดิตไม่พอ</span>' : '');
   }
 
@@ -420,7 +431,7 @@
     try {
       const r = await api('POST', '/bets', { body: { match_id: matchId, side, stake } });
       S.pick[matchId] = null;
-      toast(`แทงสำเร็จ · ล็อกราคา ${water(r.odds_taken)} ที่เส้น ${r.line_taken}`);
+      toast(`แทงสำเร็จ · ล็อก${priceWord(r.odds_taken)} ที่เส้น ${r.line_taken}`);
       await reloadAll();
     } catch (e) {
       toast(e.detail || 'แทงไม่สำเร็จ', true);
@@ -489,7 +500,7 @@
           </div>
           <div class="h-pick">
             แทง <b>${esc(b.side)}</b> ${money(b.stake)} ·
-            ${esc(b.hdcp_team_taken)} ${b.line_taken} · น้ำ ${water(b.odds_taken)}
+            ${esc(b.hdcp_team_taken)} ${b.line_taken} · ${priceWord(b.odds_taken)}
             · ${esc(fmtKO(b.kickoff_time))}
           </div>
         </div>
@@ -584,10 +595,12 @@
       team_home_flag: $('amHomeFlag').value.trim(), team_away_flag: $('amAwayFlag').value.trim(),
       stage: $('amStage').value, handicap_team: S.hdcpTeam,
       handicap_value: parseFloat($('amHdcpVal').value),
-      odds_home: parseFloat($('amOddsHome').value) || 1.90,
-      odds_away: parseFloat($('amOddsAway').value) || 1.90,
       kickoff_time: $('amKickoff').value,
     };
+    if (!S.flatOdds) {
+      body.odds_home = parseFloat($('amOddsHome').value) || 1.90;
+      body.odds_away = parseFloat($('amOddsAway').value) || 1.90;
+    }
     if (!body.handicap_team) return toast('เลือกทีมต่อก่อน', true);
     try {
       await api('POST', '/matches', { body });
@@ -605,6 +618,15 @@
     renderAdminLive();
     const st = $('amStage');
     if (st && !st.options.length) st.innerHTML = S.stages.map((s) => `<option>${esc(s)}</option>`).join('');
+    // the new-fixture form's price fields are meaningless on the flat price
+    const oddsRow = $('amOddsRow');
+    if (oddsRow) oddsRow.style.display = S.flatOdds ? 'none' : '';
+    const flatNote = $('flatOddsNote');
+    if (flatNote) {
+      flatNote.style.display = S.flatOdds ? '' : 'none';
+      flatNote.innerHTML = `ทุกบิลที่ชนะจ่าย <b>${priceLabel(S.flatOdds)}</b> เท่ากันทั้งสองฝั่ง — ` +
+        'ปรับความได้เปรียบด้วย<b>เส้นต่อรอง</b>อย่างเดียว';
+    }
   }
 
   function renderAdminDays() {
@@ -641,7 +663,7 @@
           <b>${flag(m.team_home, m.team_home_flag)} ${esc(m.team_home)} v ${flag(m.team_away, m.team_away_flag)} ${esc(m.team_away)}</b>
           <div class="faint" style="font-size:10.5px">
             ${esc(fmtKO(m.kickoff_time))} · ${hdcpLabel(m)} ·
-            น้ำ ${water(m.odds_home)} / ${water(m.odds_away)} ·
+            ${priceWord(m.odds_home)}${S.flatOdds ? "" : " / " + water(m.odds_away)} ·
             ${m.pool_bets} บิล ${money(m.pool_total)}
             ${m.can_bet ? '<span class="chip chip-open">เปิด</span>' : `<span class="chip chip-soon">${esc(m.closed_reason || 'ปิด')}</span>`}
           </div>
@@ -653,11 +675,12 @@
         </div>
         ${m.can_edit_odds ? `
           <div class="am-line">
-            <span class="am-lbl">ราคา</span>
+            <span class="am-lbl">ต่อรอง</span>
             <label class="am-fld"><i>เส้น</i><input class="in in-mini" id="hv-${m.id}" type="number" step="0.25" value="${m.handicap_value}"></label>
-            <label class="am-fld"><i>${esc(m.team_home).slice(0, 6)}</i><input class="in in-mini" id="oh-${m.id}" type="number" step="0.01" value="${m.odds_home}"></label>
-            <label class="am-fld"><i>${esc(m.team_away).slice(0, 6)}</i><input class="in in-mini" id="oa-${m.id}" type="number" step="0.01" value="${m.odds_away}"></label>
-            <button class="btn btn-ghost btn-sm" onclick="App.saveOdds(${m.id})">💾 บันทึกราคา</button>
+            ${S.flatOdds ? '' : `
+              <label class="am-fld"><i>${esc(m.team_home).slice(0, 6)}</i><input class="in in-mini" id="oh-${m.id}" type="number" step="0.01" value="${m.odds_home}"></label>
+              <label class="am-fld"><i>${esc(m.team_away).slice(0, 6)}</i><input class="in in-mini" id="oa-${m.id}" type="number" step="0.01" value="${m.odds_away}"></label>`}
+            <button class="btn btn-ghost btn-sm" onclick="App.saveOdds(${m.id})">💾 บันทึกเส้น</button>
           </div>` : ''}
         <div class="am-line">
           <span class="am-lbl">ผล</span>
@@ -671,16 +694,16 @@
   }
 
   async function saveOdds(id) {
-    const body = {
-      odds_home: parseFloat($('oh-' + id).value),
-      odds_away: parseFloat($('oa-' + id).value),
-      handicap_value: parseFloat($('hv-' + id).value),
-    };
+    const body = { handicap_value: parseFloat($('hv-' + id).value) };
+    if (!S.flatOdds) {
+      body.odds_home = parseFloat($('oh-' + id).value);
+      body.odds_away = parseFloat($('oa-' + id).value);
+    }
     try {
       await api('PUT', `/matches/${id}/odds`, { body });
-      toast('อัปเดตราคาแล้ว · บิลเดิมยังใช้ราคาเก่า');
+      toast('อัปเดตแล้ว · บิลที่แทงไปแล้วยังใช้เส้นเดิม');
       await reloadAll();
-    } catch (e) { toast(e.detail || 'อัปเดตราคาไม่สำเร็จ', true); }
+    } catch (e) { toast(e.detail || 'อัปเดตไม่สำเร็จ', true); }
   }
 
   async function setResult(id) {

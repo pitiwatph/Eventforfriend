@@ -102,7 +102,11 @@ a{color:inherit;text-decoration:none}
 .shell{
   max-width:var(--shell);
   margin:0 auto;
-  min-height:100dvh;
+  /* A fixed height, not a minimum: with min-height the leftover space was not
+     handed to .scroll, so on any view whose content is shorter than the
+     viewport the tab bar rode up with the content instead of staying pinned
+     to the bottom edge. */
+  height:100dvh;
   display:flex;
   flex-direction:column;
   position:relative;
@@ -144,7 +148,9 @@ a{color:inherit;text-decoration:none}
 .icon-btn:hover{background:var(--surface-2);color:var(--text)}
 
 /* ── Scroll area ──────────────────────────────────────────── */
-.scroll{flex:1;overflow-y:auto;padding:18px 16px 110px;}
+/* min-height:0 lets a flex child actually shrink below its content size, which
+   is what makes the inner scroll work instead of pushing the shell taller. */
+.scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:18px 16px 28px;}
 .view{display:none}
 .view.active{display:block}
 @media(prefers-reduced-motion:no-preference){
