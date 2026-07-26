@@ -97,13 +97,27 @@
 
   // Decimal odds -> Thai "water". 1.90 => 0.90 (win 90 on a 100 stake).
   const water = (odds) => (Number(odds) - 1).toFixed(2);
-  // How a price reads to a player. On the flat house price there is no water to
-  // quote, so it shows as the multiple you get back instead.
+  // How a price reads to a player. On a flat price there is nothing to quote —
+  // you win what you staked — so it is left off entirely and the amounts do the
+  // talking. A flat price other than x2 still shows its multiple, since then
+  // "stake it, win it" would be a lie.
   const priceLabel = (odds) =>
-    S.flatOdds ? '×' + Number(odds).toFixed(Number(odds) % 1 ? 2 : 0) : water(odds);
+    !S.flatOdds ? water(odds)
+      : Number(odds) === 2 ? ''
+      : '×' + Number(odds).toFixed(Number(odds) % 1 ? 2 : 0);
   // ...and the same thing spelled out where a sentence reads better
-  const priceWord = (odds) =>
-    S.flatOdds ? `ชนะได้ ${priceLabel(odds)}` : `น้ำ ${water(odds)}`;
+  const priceWord = (odds) => {
+    const l = priceLabel(odds);
+    if (!S.flatOdds) return `น้ำ ${l}`;
+    return l ? `ชนะได้ ${l}` : '';
+  };
+  // collapse the separators left behind when priceWord came back empty —
+  // leading, trailing, and doubled-up alike
+  const tidy = (s) => s
+    .replace(/\s*·\s*(?=·)/g, '')   // "a · · b" -> "a · b"
+    .replace(/^\s*·\s*/, '')        // leading
+    .replace(/\s*·\s*$/, '')        // trailing
+    .trim();
 
   // backend stores kickoff as naive Bangkok local time.
   const koDate = (s) => new Date((s || '').replace(' ', 'T'));
@@ -297,7 +311,7 @@
     return `<button class="${cls}" ${dis} onclick="App.pick(${m.id}, ${JSON.stringify(side).replace(/"/g, '&quot;')})">
         <span class="f">${flag(side)}</span>
         <span class="pb-name">${esc(side)}</span>
-        <span class="pb-odds">${priceLabel(odds)}</span>
+        ${priceLabel(odds) ? `<span class="pb-odds">${priceLabel(odds)}</span>` : ''}
         ${staked ? `<span class="pb-mine">แทงแล้ว ${money(staked)}</span>` : ''}
       </button>`;
   }
@@ -318,7 +332,7 @@
                  placeholder="จำนวนเครดิต" oninput="App.previewStake(${m.id})">
           <button class="btn btn-gold btn-sm" onclick="App.placeBet(${m.id})">แทง ${esc(side)}</button>
         </div>
-        <div class="stake-prev" id="prev-${m.id}">${priceWord(odds)} · ชนะได้ —</div>
+        <div class="stake-prev" id="prev-${m.id}">ใส่จำนวนที่จะแทง</div>
       </div>`;
   }
 
@@ -328,7 +342,7 @@
     return `<div class="mybets">${mine.map((b) => `
       <div class="mybet">
         <span class="mb-side">${flag(b.side)} ${esc(b.side)}</span>
-        <span class="mb-terms">${esc(b.hdcp_team_taken)} ${b.line_taken} · ${priceWord(b.odds_taken)}</span>
+        <span class="mb-terms">${tidy(`${esc(b.hdcp_team_taken)} ${b.line_taken} · ${priceWord(b.odds_taken)}`)}</span>
         <span class="mb-stake">${money(b.stake)}</span>
         ${b.status === 'open' && m.can_bet
           ? `<button class="lnk-edit" onclick="App.cancelBet(${b.id})">ยกเลิก</button>`
@@ -418,7 +432,7 @@
     const odds = side === m.team_home ? m.odds_home : m.odds_away;
     const stake = Number(inp.value) || 0;
     const win = stake * (Number(odds) - 1);
-    el.innerHTML = `${priceWord(odds)} · ได้คืน <b>${stake ? money(stake + win) : '—'}</b>`
+    el.innerHTML = tidy(`${priceWord(odds)} · แทง <b>${money(stake)}</b> ชนะได้ <b class="win">+${money(win)}</b>`)
       + (stake > S.me.credits ? ' <span class="over">เครดิตไม่พอ</span>' : '');
   }
 
@@ -431,7 +445,7 @@
     try {
       const r = await api('POST', '/bets', { body: { match_id: matchId, side, stake } });
       S.pick[matchId] = null;
-      toast(`แทงสำเร็จ · ล็อก${priceWord(r.odds_taken)} ที่เส้น ${r.line_taken}`);
+      toast(tidy(`แทงสำเร็จ · ล็อกเส้น ${r.line_taken} ${priceWord(r.odds_taken)}`));
       await reloadAll();
     } catch (e) {
       toast(e.detail || 'แทงไม่สำเร็จ', true);
@@ -500,8 +514,7 @@
           </div>
           <div class="h-pick">
             แทง <b>${esc(b.side)}</b> ${money(b.stake)} ·
-            ${esc(b.hdcp_team_taken)} ${b.line_taken} · ${priceWord(b.odds_taken)}
-            · ${esc(fmtKO(b.kickoff_time))}
+            ${tidy(`${esc(b.hdcp_team_taken)} ${b.line_taken} · ${priceWord(b.odds_taken)}`)} · ${esc(fmtKO(b.kickoff_time))}
           </div>
         </div>
         ${outcomeBadge(b)}
@@ -624,8 +637,10 @@
     const flatNote = $('flatOddsNote');
     if (flatNote) {
       flatNote.style.display = S.flatOdds ? '' : 'none';
-      flatNote.innerHTML = `ทุกบิลที่ชนะจ่าย <b>${priceLabel(S.flatOdds)}</b> เท่ากันทั้งสองฝั่ง — ` +
-        'ปรับความได้เปรียบด้วย<b>เส้นต่อรอง</b>อย่างเดียว';
+      flatNote.innerHTML = Number(S.flatOdds) === 2
+        ? 'ชนะได้เท่ากับที่แทง เสียก็เท่ากับที่แทง ทั้งสองฝั่งเท่ากัน — ' +
+          'ปรับความได้เปรียบด้วย<b>เส้นต่อรอง</b>อย่างเดียว'
+        : `ทุกบิลที่ชนะจ่าย <b>${priceLabel(S.flatOdds)}</b> เท่ากันทั้งสองฝั่ง`;
     }
   }
 
@@ -663,7 +678,7 @@
           <b>${flag(m.team_home, m.team_home_flag)} ${esc(m.team_home)} v ${flag(m.team_away, m.team_away_flag)} ${esc(m.team_away)}</b>
           <div class="faint" style="font-size:10.5px">
             ${esc(fmtKO(m.kickoff_time))} · ${hdcpLabel(m)} ·
-            ${priceWord(m.odds_home)}${S.flatOdds ? "" : " / " + water(m.odds_away)} ·
+            ${tidy(`${priceWord(m.odds_home)}${S.flatOdds ? "" : " / " + water(m.odds_away)}`)}${priceLabel(m.odds_home) ? " ·" : ""}
             ${m.pool_bets} บิล ${money(m.pool_total)}
             ${m.can_bet ? '<span class="chip chip-open">เปิด</span>' : `<span class="chip chip-soon">${esc(m.closed_reason || 'ปิด')}</span>`}
           </div>

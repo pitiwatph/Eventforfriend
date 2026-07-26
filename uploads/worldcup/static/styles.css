@@ -625,9 +625,11 @@ input.in::placeholder{color:var(--faint)}
   background:rgba(255,255,255,.06);color:var(--dim);border:1px solid var(--line-soft);
 }
 
-/* price buttons — name over water, so both sides read at a glance */
-.pbtn{flex-direction:column;gap:2px;min-height:62px;padding:8px 6px}
-.pbtn .pb-name{font-size:12.5px;line-height:1.1;text-align:center}
+/* side buttons — name over price, so both read at a glance. With a flat price
+   there is no price line, so the name centres on its own. */
+.pbtn{flex-direction:column;gap:2px;min-height:56px;padding:8px 6px}
+.pbtn .pb-name{font-size:13.5px;line-height:1.15;text-align:center}
+.pbtn:has(.pb-odds) .pb-name{font-size:12.5px}
 .pbtn .pb-odds{
   font-size:16px;font-weight:700;line-height:1;color:var(--gold-bright);font-variant-numeric:tabular-nums;
 }
@@ -661,7 +663,8 @@ input.in::placeholder{color:var(--faint)}
 .stake-go .in{flex:1;width:auto;padding:9px 12px;font-size:14px}
 .stake-go .btn{white-space:nowrap;flex-shrink:0}
 .stake-prev{margin-top:8px;text-align:center;font-size:11.5px;color:var(--faint)}
-.stake-prev b{color:var(--win);font-family:var(--font-display);font-weight:700}
+.stake-prev b{color:var(--text);font-family:var(--font-display);font-weight:700}
+.stake-prev b.win{color:var(--win)}
 .stake-prev .over{color:var(--loss);font-weight:700;margin-left:4px}
 
 /* receipts for bets already placed on this fixture */
