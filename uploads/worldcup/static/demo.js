@@ -263,11 +263,14 @@
           staked: r2(mine.reduce((s, b) => s + b.stake, 0)),
           at_risk: r2(open.reduce((s, b) => s + b.stake, 0)),
           net: r2(settled.reduce((s, b) => s + (b.payout - b.stake), 0)),
+          settled_stake: r2(settled.reduce((s, b) => s + b.stake, 0)),
           bets: mine.length,
           wins: settled.filter((b) => b.outcome > 0).length,
           losses: settled.filter((b) => b.outcome < 0).length,
         };
-      }).sort((a, b) => (b.credits + b.at_risk) - (a.credits + a.at_risk) || b.net - a.net));
+      // ranked on betting alone; admin top-ups are a wallet, not a score
+      }).sort((a, b) => b.net - a.net || b.wins - a.wins
+                        || a.display_name.localeCompare(b.display_name)));
     }
 
     if (method === 'POST' && path === '/bets') {

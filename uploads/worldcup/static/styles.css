@@ -690,6 +690,11 @@ input.in::placeholder{color:var(--faint)}
 .led-amt b{display:block;font-family:var(--font-display);font-weight:700;font-size:15px;font-variant-numeric:tabular-nums}
 .led-amt b.up{color:var(--win)}
 .led-amt b.down{color:var(--loss)}
+
+/* leaderboard headline is a signed win/loss, so it needs the same colouring */
+.lb-row .lb-pts.up{color:var(--win)}
+.lb-row .lb-pts.down{color:var(--loss)}
+.lb-row .lb-pts{text-align:right;line-height:1.2}
 .led-amt span{font-size:10px;color:var(--faint)}
 
 /* admin row action cluster */

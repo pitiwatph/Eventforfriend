@@ -261,12 +261,12 @@
         <div class="name">${esc(m.display_name)}</div>
         <div class="me-stats">
           <div class="stat stat-hot">
-            <div class="v">${money(m.credits)}</div>
-            <div class="k">เครดิตคงเหลือ</div>
+            <div class="v">${signed(m.net)}</div>
+            <div class="k">ได้/เสีย จากการแทง</div>
           </div>
           <div class="stat">
-            <div class="v">${signed(m.net)}</div>
-            <div class="k">กำไร/ขาดทุน</div>
+            <div class="v">${money(m.credits)}</div>
+            <div class="k">เครดิตคงเหลือ</div>
           </div>
           <div class="stat">
             <div class="v">${money(m.staked)}</div>
@@ -470,13 +470,15 @@
     if (!rows.length) { pod.innerHTML = ''; list.innerHTML = '<div class="empty">ยังไม่มีผู้เล่น</div>'; return; }
     const MEDAL = ['🥇', '🥈', '🥉'];
     const top = rows.slice(0, 3);
-    // visual order puts the winner in the middle
+    // Ranked on net win/loss from betting — credits an admin handed out are a
+    // wallet, not a score, so they stay out of the headline number.
+    const netCls = (n) => (Number(n) > 0 ? 'up' : Number(n) < 0 ? 'down' : '');
     pod.innerHTML = `<div class="podium">${[1, 0, 2].filter((i) => top[i]).map((i) => `
       <div class="pod pod-${i + 1}">
         <div class="medal">${MEDAL[i]}</div>
         <div class="pod-av">${initials(top[i].display_name)}</div>
         <div class="pod-nm">${esc(top[i].display_name)}</div>
-        <div class="pod-pts">${money(top[i].credits)}<small> เครดิต</small></div>
+        <div class="pod-pts">${signed(top[i].net)}<small> ได้/เสีย</small></div>
       </div>`).join('')}</div>`;
     list.innerHTML = rows.map((r, i) => `
       <div class="lb-row ${r.username === S.me.username ? 'me' : ''}">
@@ -485,11 +487,11 @@
         <div class="lb-info">
           <div class="lb-nm">${esc(r.display_name)}${r.username === S.me.username ? '<span class="you-tag">คุณ</span>' : ''}</div>
           <div class="lb-meta">
-            ${r.bets} บิล · ชนะ ${r.wins} · แพ้ ${r.losses}
+            ชนะ ${r.wins} · แพ้ ${r.losses} · แทงไป ${money(r.settled_stake)}
             ${r.at_risk > 0 ? ` · ค้าง ${money(r.at_risk)}` : ''}
           </div>
         </div>
-        <div class="lb-pts">${money(r.credits)}<small><br>${signed(r.net)}</small></div>
+        <div class="lb-pts ${netCls(r.net)}">${signed(r.net)}<small><br>เหลือ ${money(r.credits)}</small></div>
       </div>`).join('');
   }
 

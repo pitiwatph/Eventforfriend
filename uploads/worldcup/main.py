@@ -1331,22 +1331,29 @@ def update_cell(body: CellIn, user=Depends(require_admin)):
 # ─── Leaderboard ────────────────────────────────────────────
 @app.get("/leaderboard")
 def leaderboard(user=Depends(get_current_user)):
-    """Ranked by credits on hand. `net` is realised profit/loss; `at_risk` is
-    what is still sitting in unsettled bets."""
+    """Ranked on betting alone — `net`, the realised profit or loss across
+    settled bets.
+
+    Deliberately NOT the credit balance: credits only enter the game when an
+    admin hands them out, so ranking on the balance would put whoever was
+    topped up the most on top regardless of how they actually bet. `credits`
+    is the wallet and comes along for display; `at_risk` is what is still
+    riding on unsettled bets.
+    """
     conn = get_db()
     rows = conn.execute("""
         SELECT u.display_name, u.username, u.credits,
                COALESCE(SUM(CASE WHEN b.status != 'void' THEN b.stake END),0) AS staked,
                COALESCE(SUM(CASE WHEN b.status='open' THEN b.stake END),0) AS at_risk,
                COALESCE(SUM(CASE WHEN b.status='settled' THEN b.payout - b.stake END),0) AS net,
+               COALESCE(SUM(CASE WHEN b.status='settled' THEN b.stake END),0) AS settled_stake,
                COUNT(CASE WHEN b.status != 'void' THEN 1 END) AS bets,
                COUNT(CASE WHEN b.status='settled' AND b.outcome > 0 THEN 1 END) AS wins,
                COUNT(CASE WHEN b.status='settled' AND b.outcome < 0 THEN 1 END) AS losses
         FROM users u LEFT JOIN bets b ON b.user_id=u.id
         WHERE u.is_admin=0
         GROUP BY u.id
-        ORDER BY (u.credits + COALESCE(SUM(CASE WHEN b.status='open' THEN b.stake END),0)) DESC,
-                 net DESC""").fetchall()
+        ORDER BY net DESC, wins DESC, u.display_name""").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
