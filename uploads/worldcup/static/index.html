@@ -7,11 +7,11 @@
 <meta http-equiv="Cache-Control" content="no-store">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Event For Friend · Points Activity</title>
+<title>Event For Friend · ASEAN Championship 2026</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Kanit:ital,wght@0,400;0,500;0,600;0,700;1,600;1,700&family=Noto+Sans+Thai:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=15">
+<link rel="stylesheet" href="styles.css?v=16">
 </head>
 <body>
 
@@ -20,7 +20,7 @@
   <div class="auth-inner">
     <div class="auth-logo">
       <div class="cup-big">🏆</div>
-      <p>กิจกรรมสะสมแต้มเพื่อความบันเทิง · Points Activity</p>
+      <p>กิจกรรมเพื่อความบันเทิงในหมู่เพื่อน · ASEAN Championship 2026</p>
     </div>
     <div class="auth-card">
       <div class="auth-title">เข้าสู่ระบบ <span class="en">Sign in</span></div>
@@ -51,7 +51,7 @@
   <header class="appbar">
     <div class="brand">
       <div class="cup">🏆</div>
-      <div class="t"><b>Event For Friend</b><span>Points Activity</span></div>
+      <div class="t"><b>Event For Friend</b><span>ASEAN Championship 2026</span></div>
     </div>
     <div class="appbar-user">
       <button class="icon-btn" id="tweakBtn" title="ปรับแต่ง / Tweaks" onclick="Tweaks.toggle()">⚙</button>
@@ -62,11 +62,11 @@
 
   <main class="scroll" id="scroll">
 
-    <!-- ── PREDICT ── -->
-    <section class="view active" id="view-matches" data-screen-label="Predict">
+    <!-- ── BET ── -->
+    <section class="view active" id="view-matches" data-screen-label="Bet">
       <div id="meHero"></div>
-      <div id="nextHero"></div>
-      <div class="section-label"><span class="dot"></span> นัดที่เปิดให้ทาย · Open fixtures</div>
+      <div class="section-label"><span class="dot"></span> เลือกวันแข่ง · Matchday</div>
+      <div class="lb-phase-tabs" id="dayTabs"></div>
       <div id="matchList"></div>
     </section>
 
@@ -74,7 +74,7 @@
     <section class="view" id="view-results" data-screen-label="Results">
       <div class="page-head">
         <h1>ผลการแข่งขัน <span class="en">Results</span></h1>
-        <div class="sub">นัดที่จบแล้ว แยกตามรอบ · finished fixtures by stage</div>
+        <div class="sub">นัดที่จบและคิดเงินแล้ว · settled fixtures</div>
       </div>
       <div id="resultsSummary"></div>
       <div id="resultsList"></div>
@@ -83,38 +83,38 @@
     <!-- ── LEADERBOARD ── -->
     <section class="view" id="view-leaderboard" data-screen-label="Leaderboard">
       <div class="page-head">
-        <h1>ตารางคะแนน <span class="en">Leaderboard</span></h1>
-        <div class="sub">อันดับจากแต้มทายผล · ranked by points</div>
+        <h1>อันดับ <span class="en">Leaderboard</span></h1>
+        <div class="sub">เรียงตามเครดิตคงเหลือ · ranked by credits</div>
       </div>
-      <div class="lb-phase-tabs" id="lbPhaseTabs"></div>
       <div id="podium"></div>
       <div id="lbList" class="lb-list"></div>
-    </section>
-
-    <!-- ── CHAMPION ── -->
-    <section class="view" id="view-champion" data-screen-label="Champion">
-      <div class="page-head">
-        <h1>ทายแชมป์ <span class="en">Champion</span></h1>
-        <div class="sub" id="champSub">ทายทีมที่จะได้แชมป์จาก 8 ทีมสุดท้าย</div>
-      </div>
-      <div id="champBody"></div>
     </section>
 
     <!-- ── HISTORY ── -->
     <section class="view" id="view-history" data-screen-label="History">
       <div class="page-head">
-        <h1>ประวัติการทาย <span class="en">My Predictions</span></h1>
-        <div class="sub">ผลการทายทั้งหมดของคุณ · everything you've called</div>
+        <h1>ประวัติของฉัน <span class="en">My Bets</span></h1>
+        <div class="sub">ทุกบิลที่แทง พร้อมราคาที่ล็อกไว้ · every stake at the price you took</div>
       </div>
       <div id="histSummary"></div>
       <div id="histList" class="hist"></div>
+
+      <div class="section-label"><span class="dot"></span> รายการเครดิต · Credit ledger</div>
+      <div id="ledgerList" class="hist"></div>
     </section>
 
     <!-- ── ADMIN ── -->
     <section class="view" id="view-admin" data-screen-label="Admin">
       <div class="page-head">
         <h1>แอดมิน <span class="en">Admin</span></h1>
-        <div class="sub">จัดการนัด · ผู้ใช้ · ทีม · ข้อมูล</div>
+        <div class="sub">เปิดรับพนันรายวัน · ราคา · เครดิต · ผล</div>
+      </div>
+
+      <!-- Betting days -->
+      <div class="card">
+        <div class="section-label" style="margin-top:0"><span class="dot"></span> 📅 เปิดรับพนันรายวัน · Betting days</div>
+        <div class="flag-help">เปิดทีละวัน — พอเปิดแล้ว ทุกนัดของวันนั้นแทงได้ และแต่ละนัดจะ<b>ปิดตัวเองอัตโนมัติก่อนเตะ 10 นาที</b></div>
+        <div id="adminDays"></div>
       </div>
 
       <!-- New fixture -->
@@ -124,17 +124,17 @@
           <div class="form-2">
             <div class="form-row">
               <label class="fld">เจ้าบ้าน <span class="en">Home</span></label>
-              <input class="in" id="amHome" list="teamNames" placeholder="Spain" required oninput="App.onTeamInput('home')">
+              <input class="in" id="amHome" list="teamNames" placeholder="Thailand" required oninput="App.onTeamInput('home')">
             </div>
             <div class="form-row">
               <label class="fld">ทีมเยือน <span class="en">Away</span></label>
-              <input class="in" id="amAway" list="teamNames" placeholder="Germany" required oninput="App.onTeamInput('away')">
+              <input class="in" id="amAway" list="teamNames" placeholder="Vietnam" required oninput="App.onTeamInput('away')">
             </div>
           </div>
 
           <div class="form-row">
             <label class="fld">ธงทีม <span class="en">Team flags</span></label>
-            <div class="flag-help">เลือกทีมจากทะเบียน → ระบบใส่ธงให้อัตโนมัติ หรือวางลิงก์รูปธง (URL) เอง · auto-filled from the team registry; paste a URL to override</div>
+            <div class="flag-help">เลือกทีมจากทะเบียน → ระบบใส่ธงให้อัตโนมัติ หรือวางลิงก์รูปธง (URL) เอง</div>
             <div class="form-2">
               <div class="flagpick">
                 <span class="flag-prev" id="amHomeFlagPrev"></span>
@@ -153,29 +153,20 @@
           </div>
           <div class="form-2">
             <div class="form-row">
-              <label class="fld">ค่าแฮนดิแคป <span class="en">Line</span></label>
+              <label class="fld">เส้นต่อรอง <span class="en">Line</span></label>
               <select class="in" id="amHdcpVal">
-                <option value="0">0 — เสมอ (draw)</option>
-                <option value="0.25">0.25</option>
-                <option value="0.5" selected>0.5</option>
-                <option value="0.75">0.75</option>
-                <option value="1">1.0</option>
+                <option value="0">0 — ราคาเรียบ</option>
+                <option value="0.25">0.25 — เสมอควบครึ่ง</option>
+                <option value="0.5" selected>0.5 — ครึ่งลูก</option>
+                <option value="0.75">0.75 — ครึ่งควบลูก</option>
+                <option value="1">1.0 — ลูกเต็ม</option>
                 <option value="1.25">1.25</option>
                 <option value="1.5">1.5</option>
                 <option value="1.75">1.75</option>
                 <option value="2">2.0</option>
                 <option value="2.25">2.25</option>
                 <option value="2.5">2.5</option>
-                <option value="2.75">2.75</option>
                 <option value="3">3.0</option>
-                <option value="3.25">3.25</option>
-                <option value="3.5">3.5</option>
-                <option value="3.75">3.75</option>
-                <option value="4">4.0</option>
-                <option value="4.25">4.25</option>
-                <option value="4.5">4.5</option>
-                <option value="4.75">4.75</option>
-                <option value="5">5.0</option>
               </select>
             </div>
             <div class="form-row">
@@ -183,35 +174,26 @@
               <select class="in" id="amStage"></select>
             </div>
           </div>
-          <div class="form-2">
-            <div class="form-row">
-              <label class="fld">เวลาเตะ <span class="en">Kickoff</span></label>
-              <input class="in" id="amKickoff" type="datetime-local" required>
+          <div class="form-row">
+            <label class="fld">ราคาน้ำ (decimal) <span class="en">Odds</span></label>
+            <div class="flag-help">ใส่แบบ decimal — <code>1.90</code> หมายถึงแทง 100 ชนะได้ 90 (น้ำ 0.90)</div>
+            <div class="form-2">
+              <input class="in" id="amOddsHome" type="number" step="0.01" min="1.01" value="1.90" placeholder="ราคาเจ้าบ้าน">
+              <input class="in" id="amOddsAway" type="number" step="0.01" min="1.01" value="1.90" placeholder="ราคาทีมเยือน">
             </div>
-            <div class="form-row">
-              <label class="fld">ตัวคูณคะแนน <span class="en">Points ×</span></label>
-              <select class="in" id="amMult">
-                <option value="1" selected>×1 — ปกติ</option>
-                <option value="2">×2 — สองเท่า</option>
-                <option value="4">×4 — สี่เท่า</option>
-              </select>
-            </div>
+          </div>
+          <div class="form-row">
+            <label class="fld">เวลาเตะ <span class="en">Kickoff</span></label>
+            <input class="in" id="amKickoff" type="datetime-local" required>
           </div>
           <button class="btn btn-gold btn-block" type="submit">+ เพิ่มนัด · Add fixture</button>
         </form>
       </div>
 
-      <!-- Champion prediction config -->
-      <div class="card">
-        <div class="section-label" style="margin-top:0"><span class="dot"></span> 🏆 ทายแชมป์ · Champion prediction</div>
-        <div class="faint" style="font-size:11px;margin:-4px 0 10px">ทีมให้เลือกมาจากนัดรอบ Quarter-finals อัตโนมัติ · ปิดรับตามเวลาด้านล่าง · ประกาศแชมป์เมื่อจบเพื่อแจกคะแนน</div>
-        <div id="champAdmin"></div>
-      </div>
-
       <!-- Live in-progress scores -->
       <div class="card">
         <div class="section-label" style="margin-top:0"><span class="dot"></span> 🔴 สกอร์สด · กำลังแข่งขัน</div>
-        <div class="faint" style="font-size:11px;margin:-4px 0 10px">นัดที่ <b>ผูก event ไว้</b> ระบบจะดึงสกอร์ <b>อัตโนมัติทุก 15 นาที</b> ตั้งแต่เริ่มเตะไป 150 นาที และปิดผลให้เองเมื่อจบเกม — ไม่ต้องเปิดหน้าจอค้างไว้ (กรอกเองด้านล่างได้เสมอ)</div>
+        <div class="faint" style="font-size:11px;margin:-4px 0 10px">นัดที่ <b>ผูก event ไว้</b> ระบบจะดึงสกอร์ <b>อัตโนมัติทุก 15 นาที</b> ตั้งแต่เริ่มเตะไป 150 นาที และคิดเงินให้เองเมื่อจบเกม (กรอกเองด้านล่างได้เสมอ)</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
           <button class="btn btn-ghost btn-sm" onclick="App.loadApiFixtures()">📋 โหลดรายชื่อนัด (ESPN)</button>
           <button class="btn btn-ghost btn-sm" onclick="App.fetchScores()">🔄 ดึงสกอร์ตอนนี้</button>
@@ -219,15 +201,17 @@
         <div id="liveScores"></div>
       </div>
 
-      <!-- Fixtures / results / lock -->
+      <!-- Fixtures / odds / results -->
       <div class="card">
-        <div class="section-label" style="margin-top:0"><span class="dot"></span> นัด · ผล · ปิดรับทาย</div>
+        <div class="section-label" style="margin-top:0"><span class="dot"></span> นัด · ราคา · ผล</div>
+        <div class="flag-help">แก้ราคาได้จนถึงก่อนเตะ 10 นาที — <b>บิลที่แทงไปแล้วยังใช้ราคาเดิมเสมอ</b></div>
         <div id="adminMatches"></div>
       </div>
 
-      <!-- Create user -->
+      <!-- Users & credits -->
       <div class="card">
-        <div class="section-label" style="margin-top:0"><span class="dot"></span> สร้างผู้ใช้ · Create user</div>
+        <div class="section-label" style="margin-top:0"><span class="dot"></span> ผู้ใช้ + เครดิต · Users &amp; credits</div>
+        <div class="flag-help">เครดิตเข้าระบบได้ทางเดียวคือแอดมินเติมให้ · ใส่ค่าติดลบเพื่อดึงคืน</div>
         <form id="createUserForm" onsubmit="App.createUser(event)">
           <div class="form-row">
             <label class="fld">ชื่อเล่นเจ้าของ User <span class="en">Display name</span></label>
@@ -242,6 +226,10 @@
               <label class="fld">Password</label>
               <input class="in" id="cuPass" placeholder="••••••" required>
             </div>
+          </div>
+          <div class="form-row">
+            <label class="fld">เครดิตเริ่มต้น <span class="en">Starting credits</span></label>
+            <input class="in" id="cuCredits" type="number" step="1" min="0" value="0" placeholder="0">
           </div>
           <button class="btn btn-gold btn-block" type="submit">+ สร้างผู้ใช้ · Create</button>
         </form>
@@ -270,12 +258,12 @@
         <div class="section-label" style="margin-top:0"><span class="dot"></span> คอนโซลข้อมูล · Data query (SQL)</div>
         <div class="flag-help">รันได้เฉพาะคำสั่ง <code>SELECT</code> (อ่านอย่างเดียว) บนฐานข้อมูลหลังบ้าน</div>
         <div class="sql-samples">
-          <button type="button" onclick="App.sqlSample('SELECT * FROM leaderboard')">leaderboard</button>
-          <button type="button" onclick="App.sqlSample('SELECT id, username, display_name FROM users')">users</button>
-          <button type="button" onclick="App.sqlSample('SELECT team_home, team_away, stage, status FROM matches')">matches</button>
-          <button type="button" onclick="App.sqlSample('SELECT COUNT(*) FROM predictions')">count predictions</button>
+          <button type="button" onclick="App.sqlSample('SELECT display_name, credits FROM users ORDER BY credits DESC')">เครดิต</button>
+          <button type="button" onclick="App.sqlSample('SELECT * FROM bets ORDER BY id DESC LIMIT 50')">บิลล่าสุด</button>
+          <button type="button" onclick="App.sqlSample('SELECT * FROM credit_ledger ORDER BY id DESC LIMIT 50')">ledger</button>
+          <button type="button" onclick="App.sqlSample('SELECT team_home, team_away, handicap_value, odds_home, odds_away, status FROM matches')">matches</button>
         </div>
-        <textarea class="in sql-box" id="sqlBox" rows="3" placeholder="SELECT * FROM matches WHERE status='finished'"></textarea>
+        <textarea class="in sql-box" id="sqlBox" rows="3" placeholder="SELECT * FROM bets WHERE status='settled'"></textarea>
         <button class="btn btn-gold btn-block" onclick="App.runQuery()">▶ รัน · Run</button>
         <div id="sqlOut" class="sql-out"></div>
       </div>
@@ -285,16 +273,13 @@
 
   <nav class="tabbar" id="tabbar">
     <button class="tab active" data-view="matches" onclick="App.go('matches')">
-      <span class="ic">⚽</span><span class="lb">ทายผล</span><span class="en">Predict</span>
+      <span class="ic">⚽</span><span class="lb">แทง</span><span class="en">Bet</span>
     </button>
     <button class="tab" data-view="results" onclick="App.go('results')">
       <span class="ic">📊</span><span class="lb">ผลแข่ง</span><span class="en">Results</span>
     </button>
     <button class="tab" data-view="leaderboard" onclick="App.go('leaderboard')">
-      <span class="ic">🏅</span><span class="lb">คะแนน</span><span class="en">Ranks</span>
-    </button>
-    <button class="tab" data-view="champion" onclick="App.go('champion')">
-      <span class="ic">🏆</span><span class="lb">แชมป์</span><span class="en">Champion</span>
+      <span class="ic">🏅</span><span class="lb">อันดับ</span><span class="en">Ranks</span>
     </button>
     <button class="tab" data-view="history" onclick="App.go('history')">
       <span class="ic">📜</span><span class="lb">ประวัติ</span><span class="en">History</span>
@@ -321,13 +306,6 @@
         <label class="fld">Username</label>
         <input class="in" id="pfUser" autocomplete="off" disabled>
       </div>
-      <div class="form-row" id="pfKoRow" style="display:none">
-        <label class="fld">สิทธิ์ทายรอบน็อคเอาท์ <span class="en">Knockout access</span></label>
-        <div class="tw-toggle" onclick="App.togglePfKnockout()" style="cursor:pointer">
-          <span id="pfKoLabel">อนุญาตให้ทาย</span>
-          <div class="sw" id="pfKoSw"></div>
-        </div>
-      </div>
       <div class="form-row">
         <label class="fld">รหัสผ่านใหม่ <span class="en">New password</span></label>
         <input class="in" id="pfPass" autocomplete="new-password" placeholder="เว้นว่างไว้ถ้าไม่เปลี่ยน">
@@ -346,9 +324,9 @@
   <div class="tw-body" id="twBody"></div>
 </div>
 
-<script src="flags.js?v=15"></script>
-<script src="demo.js?v=15"></script>
-<script src="app.js?v=15"></script>
-<script src="tweaks.js?v=15"></script>
+<script src="flags.js?v=16"></script>
+<script src="demo.js?v=16"></script>
+<script src="app.js?v=16"></script>
+<script src="tweaks.js?v=16"></script>
 </body>
 </html>

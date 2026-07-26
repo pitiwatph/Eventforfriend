@@ -3,407 +3,421 @@
    connection failure. State is in-memory (resets on reload). */
 (function () {
   const r4 = (n) => Math.round(n * 1e4) / 1e4;
+  const r2 = (n) => Math.round(n * 100) / 100;
   const MIN = 60000, HR = 60 * MIN, DAY = 24 * HR;
   const now = Date.now();
 
-  const STAGES = ['Group Stage', 'Round of 32', 'Round of 16', 'Quarter-finals',
-    'Semi-finals', 'Third-Place Play-off', 'The Final'];
+  const STAGES = ['Group Stage', 'Semi-finals', 'The Final'];
+  const CUTOFF_MIN = 10;
+  const BUILD = '16';
 
-  // ── faithful port of main.py calc_points (Asian handicap) ──────────
-  function calcPoints(m, predictedWinner) {
-    const h = m.score_home, a = m.score_away, hv = m.handicap_value, ht = m.handicap_team;
-    const rawDiff = (ht === m.team_home) ? (h - a) : (a - h);
-    function scoreLine(raw, line) {
-      const d = r4(raw - line);
-      if (line % 1 === 0) { if (d > 0) return 2; if (d === 0) return 1; return 0; }
-      return d > 0 ? 2 : 0;
+  // ── faithful port of main.py ah_outcome / payout_for ───────────────
+  function ahOutcome(terms, side, sh, sa) {
+    const ht = terms.hdcp_team, line = Number(terms.line);
+    const raw = (ht === terms.team_home) ? (sh - sa) : (sa - sh);
+    function oneLine(rawDiff, ln) {
+      const d = r4(rawDiff - ln);
+      if (ln % 1 === 0) return d > 0 ? 1 : (d === 0 ? 0 : -1);
+      return d > 0 ? 1 : -1;
     }
-    const frac = r4(((hv % 1) + 1) % 1);
-    let s;
-    if (frac === 0.25 || frac === 0.75) s = (scoreLine(rawDiff, hv - 0.25) + scoreLine(rawDiff, hv + 0.25)) / 2;
-    else s = scoreLine(rawDiff, hv);
-    return predictedWinner === ht ? s : 2 - s;
+    const frac = r4(((line % 1) + 1) % 1);
+    const res = (frac === 0.25 || frac === 0.75)
+      ? (oneLine(raw, line - 0.25) + oneLine(raw, line + 0.25)) / 2
+      : oneLine(raw, line);
+    return side === ht ? res : -res;
   }
-  const normMult = (m) => ([1, 2, 4].includes(+m) ? +m : 1);
-  function scoredPoints(m, predictedWinner) { return calcPoints(m, predictedWinner) * normMult(m.multiplier); }
 
-  // ── team registry (pre-defined flags) ──────────────────────────────
+  function payoutFor(stake, odds, outcome) {
+    const profit = stake * (odds - 1);
+    if (outcome === 1) return stake + profit;
+    if (outcome === 0.5) return stake + profit / 2;
+    if (outcome === 0) return stake;
+    if (outcome === -0.5) return stake / 2;
+    return 0;
+  }
+
+  // ── team registry (ASEAN Championship) ─────────────────────────────
   const TEAM_SEED = [
-    ['Argentina','ar'],['Brazil','br'],['France','fr'],['England','gb-eng'],['Spain','es'],
-    ['Germany','de'],['Portugal','pt'],['Netherlands','nl'],['Italy','it'],['Belgium','be'],
-    ['Croatia','hr'],['Uruguay','uy'],['Mexico','mx'],['USA','us'],['Canada','ca'],
-    ['Japan','jp'],['South Korea','kr'],['Australia','au'],['Morocco','ma'],['Senegal','sn'],
-    ['Ghana','gh'],['Nigeria','ng'],['Cameroon','cm'],['Ivory Coast','ci'],['Saudi Arabia','sa'],
-    ['Iran','ir'],['Qatar','qa'],['Switzerland','ch'],['Denmark','dk'],['Poland','pl'],
-    ['Serbia','rs'],['Wales','gb-wls'],['Scotland','gb-sct'],['Ecuador','ec'],['Colombia','co'],
-    ['Peru','pe'],['Chile','cl'],['Paraguay','py'],['Venezuela','ve'],['Costa Rica','cr'],
-    ['Panama','pa'],['Jamaica','jm'],['Honduras','hn'],['Austria','at'],['Sweden','se'],
-    ['Norway','no'],['Turkey','tr'],['Ukraine','ua'],['Czech Republic','cz'],['Hungary','hu'],
-    ['Greece','gr'],['Egypt','eg'],['Algeria','dz'],['Tunisia','tn'],['South Africa','za'],
-    ['Mali','ml'],['New Zealand','nz'],['Uzbekistan','uz'],['Iraq','iq'],['UAE','ae'],
-    ['Jordan','jo'],['Thailand','th'],['Vietnam','vn'],
+    ['Thailand', 'th'], ['Vietnam', 'vn'], ['Indonesia', 'id'], ['Malaysia', 'my'],
+    ['Singapore', 'sg'], ['Philippines', 'ph'], ['Myanmar', 'mm'], ['Cambodia', 'kh'],
+    ['Laos', 'la'], ['Timor-Leste', 'tl'], ['Brunei', 'bn'],
   ];
   const flagUrl = (iso) => (window.__resources && window.__resources['flag_' + iso]) || `https://flagcdn.com/w80/${iso}.png`;
   let tid = 1;
   const teams = TEAM_SEED.map(([name, iso]) => ({ id: tid++, name, flag: flagUrl(iso) }));
   const regFlag = (name) => { const t = teams.find((x) => x.name === name); return t ? t.flag : ''; };
 
-  // ── seed users / matches / predictions ─────────────────────────────
-  let uid = 1, mid = 1, pid = 1;
-  const users = [], matches = [], predictions = [];
-  let displaySettings = { home_stats: ['knockout', 'overall', 'wins'], lb_tabs: ['overall', 'group', 'knockout'] };
-  let championCfg = { deadline: '2026-07-09T23:59:59', points: 4, champion_team: null, teams: [] };
-  const championPicks = [];   // {user_id, team, points}
+  // ── state ──────────────────────────────────────────────────────────
+  let uid = 1, mid = 1, bid = 1, lid = 1;
+  const users = [], matches = [], bets = [], ledger = [], betDays = {};
 
-  function addUser(username, display, isAdmin) {
-    users.push({ id: uid++, username, display_name: display, password: username === 'admin' ? 'admin1234' : '1234', is_admin: isAdmin ? 1 : 0, knockout_eligible: 1 });
+  const pad = (n) => String(n).padStart(2, '0');
+  // store kickoffs the way the backend does: naive Bangkok 'YYYY-MM-DDTHH:MM'
+  function isoLocal(ts) {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
-  addUser('admin', 'น้องปอนด์ (Admin)', true);
-  addUser('guest', 'คุณเอ๋ (You)', false);
-  ['เจมส์', 'บีม', 'ป๊อก', 'หนิง', 'ตูน', 'มาร์ค', 'ฟ้า'].forEach((n, i) => addUser('p' + i, n, false));
+  const playDateOf = (kick) => (kick || '').slice(0, 10);
 
-  function at(off) {
-    const d = new Date(now + off), p = (n) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:00`;
+  function addUser(username, display_name, password, is_admin, credits) {
+    const u = { id: uid++, username, display_name, password, is_admin: is_admin ? 1 : 0, credits: 0 };
+    users.push(u);
+    if (credits) move(u, credits, 'topup', 'เครดิตเริ่มต้น');
+    return u;
   }
-  function addMatch(o) {
-    const m = { id: mid++, status: 'upcoming', locked: 0, force_open: 0, score_home: null, score_away: null,
-      team_home_flag: '', team_away_flag: '', stage: 'Group Stage', ...o };
-    if (!m.team_home_flag) m.team_home_flag = regFlag(m.team_home);
-    if (!m.team_away_flag) m.team_away_flag = regFlag(m.team_away);
+
+  function move(user, delta, reason, note, bet_id) {
+    user.credits = r2(user.credits + delta);
+    ledger.unshift({
+      id: lid++, user_id: user.id, delta: r2(delta), balance_after: user.credits,
+      reason, note: note || '', bet_id: bet_id || null,
+      display_name: user.display_name, username: user.username,
+      created_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+    });
+    return user.credits;
+  }
+
+  function addMatch(home, away, ht, line, oh, oa, kickTs, stage) {
+    const kickoff_time = isoLocal(kickTs);
+    const m = {
+      id: mid++, team_home: home, team_away: away,
+      team_home_flag: regFlag(home), team_away_flag: regFlag(away),
+      stage: stage || 'Group Stage', handicap_team: ht, handicap_value: line,
+      odds_home: oh, odds_away: oa, kickoff_time, play_date: playDateOf(kickoff_time),
+      score_home: null, score_away: null, status: 'upcoming',
+      locked: 0, force_open: 0, apifootball_fixture_id: null,
+    };
     matches.push(m);
     return m;
   }
 
-  // finished (history + leaderboard) — generate a realistic Group Stage backlog
-  const finishedSeed = [
-    ['Brazil','Serbia','Brazil',1.0,2,0],['France','Denmark','France',0.5,1,1],
-    ['Argentina','Mexico','Argentina',0.25,2,0],['Spain','Costa Rica','Spain',2.0,3,0],
-    ['Portugal','Ghana','Portugal',1.0,3,2],['Netherlands','Ecuador','Netherlands',0.75,1,1],
-    ['England','Wales','England',1.25,3,0],['Belgium','Canada','Belgium',0.75,1,0],
-    ['Croatia','Morocco','Croatia',0.25,0,0],['Uruguay','South Korea','Uruguay',0.5,0,0],
+  const admin = addUser('admin', 'น้องปอนด์ (Admin)', 'admin1234', 1, 0);
+  const guest = addUser('guest', 'ผู้เยี่ยมชม', '1234', 0, 1000);
+  const rivals = [
+    addUser('ake', 'เอก', 'x', 0, 1000), addUser('bee', 'บี', 'x', 0, 1000),
+    addUser('cha', 'ช้าง', 'x', 0, 1000), addUser('dao', 'ดาว', 'x', 0, 1000),
   ];
-  let dayBack = finishedSeed.length;
-  const fmatches = finishedSeed.map((s) => {
-    const m = addMatch({ team_home: s[0], team_away: s[1], handicap_team: s[2], handicap_value: s[3],
-      kickoff_time: at(-(dayBack--) * (DAY / 2)), score_home: s[4], score_away: s[5], status: 'finished', locked: 1, stage: 'Group Stage' });
-    return m;
-  });
 
-  // upcoming
-  const u1 = addMatch({ team_home: 'Spain', team_away: 'Germany', handicap_team: 'Spain', handicap_value: 0.25, kickoff_time: at(2 * HR + 40 * MIN), stage: 'Round of 16' });
-  const u2 = addMatch({ team_home: 'England', team_away: 'Netherlands', handicap_team: 'England', handicap_value: 0.5, kickoff_time: at(1 * DAY + 2 * HR), stage: 'Round of 16' });
-  const u3 = addMatch({ team_home: 'Portugal', team_away: 'Morocco', handicap_team: 'Portugal', handicap_value: 0.75, kickoff_time: at(2 * DAY + 3 * HR), stage: 'Quarter-finals' });
-  const lk = addMatch({ team_home: 'Japan', team_away: 'Croatia', handicap_team: 'Croatia', handicap_value: 0.25, kickoff_time: at(18 * MIN), stage: 'Round of 16' }); // cutoff passed
+  // yesterday (settled), today (open), tomorrow (not yet opened)
+  const mYest1 = addMatch('Thailand', 'Cambodia', 'Thailand', 1.5, 1.90, 1.90, now - DAY, 'Group Stage');
+  const mYest2 = addMatch('Vietnam', 'Laos', 'Vietnam', 1.25, 1.85, 1.95, now - DAY + HR, 'Group Stage');
+  const mToday1 = addMatch('Malaysia', 'Singapore', 'Malaysia', 0.25, 1.88, 1.92, now + 3 * HR, 'Group Stage');
+  const mToday2 = addMatch('Indonesia', 'Philippines', 'Indonesia', 0.75, 1.95, 1.85, now + 5 * HR, 'Group Stage');
+  const mTomo = addMatch('Thailand', 'Vietnam', 'Thailand', 0.5, 1.90, 1.90, now + DAY, 'Group Stage');
 
-  function pred(userId, m, winner) {
-    const p = { id: pid++, user_id: userId, match_id: m.id, predicted_winner: winner, points: null };
-    if (m.status === 'finished') p.points = scoredPoints(m, winner);
-    predictions.push(p);
+  betDays[mYest1.play_date] = 'closed';
+  betDays[mToday1.play_date] = 'open';
+  betDays[mTomo.play_date] = 'draft';
+
+  function placeDemoBet(user, m, side, stake) {
+    const odds = side === m.team_home ? m.odds_home : m.odds_away;
+    const b = {
+      id: bid++, user_id: user.id, match_id: m.id, side, stake,
+      hdcp_team_taken: m.handicap_team, line_taken: m.handicap_value, odds_taken: odds,
+      status: 'open', outcome: null, payout: null,
+      placed_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+    };
+    bets.push(b);
+    move(user, -stake, 'bet', `${m.team_home} v ${m.team_away} · ${side}`, b.id);
+    return b;
   }
-  const U = (uname) => users.find((u) => u.username === uname).id;
-  // spread predictions across finished matches to build standings
-  const picks = {
-    guest: ['Brazil','France','Argentina','Spain','Portugal','Ecuador','England','Belgium','Croatia','Uruguay'],
-    p0: ['Brazil','France','Argentina','Spain','Ghana','Netherlands','England','Canada','Croatia','South Korea'],
-    p1: ['Brazil','Denmark','Argentina','Spain','Portugal','Netherlands','Wales','Belgium','Morocco','Uruguay'],
-    p2: ['Serbia','France','Mexico','Spain','Portugal','Ecuador','England','Belgium','Croatia','Uruguay'],
-    p3: ['Brazil','France','Argentina','Costa Rica','Portugal','Netherlands','England','Canada','Croatia'],
-    p4: ['Serbia','Denmark','Mexico','Spain','Ghana','Netherlands','Wales','Belgium','Morocco','South Korea'],
-    p5: ['Brazil','France','Argentina','Spain','Portugal','Netherlands','England'],
-    p6: ['France','Argentina','Spain','Portugal','Netherlands','England','Belgium','Croatia','Uruguay'],
-  };
-  Object.entries(picks).forEach(([uname, arr]) => arr.forEach((w, i) => { if (fmatches[i]) pred(U(uname), fmatches[i], w); }));
-  // some upcoming picks already in
-  pred(U('guest'), u1, 'Spain'); pred(U('guest'), u2, 'England');
 
-  // ── token helpers ──────────────────────────────────────────────────
-  const tokenFor = (u) => 'demo.' + u.username;
-  const userFromToken = (t) => users.find((u) => tokenFor(u) === t);
+  // seed some history so the demo boards aren't empty
+  [guest, ...rivals].forEach((u, i) => {
+    placeDemoBet(u, mYest1, i % 2 ? mYest1.team_away : mYest1.team_home, 100 + i * 20);
+    placeDemoBet(u, mYest2, i % 3 ? mYest2.team_home : mYest2.team_away, 80 + i * 15);
+  });
+  placeDemoBet(guest, mToday1, mToday1.team_home, 150);
+
+  function settle(m, sh, sa, final) {
+    m.score_home = sh; m.score_away = sa;
+    m.status = final ? 'finished' : 'live';
+    m.locked = 1;
+    if (!final) return 0;
+    let n = 0;
+    bets.filter((b) => b.match_id === m.id && b.status !== 'void').forEach((b) => {
+      const u = users.find((x) => x.id === b.user_id);
+      if (b.status === 'settled' && b.payout != null) move(u, -b.payout, 'refund', 'แก้ผล', b.id);
+      const terms = { team_home: m.team_home, team_away: m.team_away, hdcp_team: b.hdcp_team_taken, line: b.line_taken };
+      b.outcome = ahOutcome(terms, b.side, sh, sa);
+      b.payout = r2(payoutFor(b.stake, b.odds_taken, b.outcome));
+      b.status = 'settled';
+      if (b.payout) move(u, b.payout, 'payout', `ผลนัด #${m.id}`, b.id);
+      n++;
+    });
+    return n;
+  }
+  settle(mYest1, 2, 0, true);
+  settle(mYest2, 1, 1, true);
+
+  // ── betting gate (mirrors main.py bet_gate) ────────────────────────
+  const dayStatus = (d) => betDays[d] || 'draft';
+  function betGate(m) {
+    if (m.status === 'finished') return 'นัดนี้จบไปแล้ว';
+    if (m.force_open) return null;
+    if (m.locked) return 'แอดมินปิดรับพนันนัดนี้แล้ว';
+    if (m.status !== 'upcoming') return 'นัดนี้เริ่มไปแล้ว';
+    if (dayStatus(m.play_date) !== 'open') return 'ยังไม่เปิดรับพนันของวันนี้';
+    const ko = new Date(m.kickoff_time).getTime();
+    if (Date.now() >= ko - CUTOFF_MIN * MIN) return `ปิดรับแล้ว (ต้องแทงก่อนเตะ ${CUTOFF_MIN} นาที)`;
+    return null;
+  }
+
+  function decorate(m) {
+    const pool = bets.filter((b) => b.match_id === m.id && b.status !== 'void');
+    const reason = betGate(m);
+    return {
+      ...m, can_bet: reason === null, closed_reason: reason,
+      day_status: dayStatus(m.play_date),
+      pool_bets: pool.length, pool_total: r2(pool.reduce((s, b) => s + b.stake, 0)),
+    };
+  }
+
+  // ── router ─────────────────────────────────────────────────────────
   const ok = (data) => ({ status: 200, data });
   const err = (status, detail) => ({ status, data: { detail } });
+  const tokenOf = (u) => 'demo.' + u.username;
+  const userFromToken = (t) => users.find((u) => tokenOf(u) === t) || null;
 
-  function publicMatch(m) { return { ...m }; }
-  function joinMine(me) {
-    return predictions.filter((p) => p.user_id === me.id).map((p) => {
-      const m = matches.find((x) => x.id === p.match_id) || {};
-      return { ...p, team_home: m.team_home, team_away: m.team_away, team_home_flag: m.team_home_flag,
-        team_away_flag: m.team_away_flag, stage: m.stage, handicap_team: m.handicap_team,
-        handicap_value: m.handicap_value, kickoff_time: m.kickoff_time, score_home: m.score_home,
-        score_away: m.score_away, status: m.status, locked: m.locked, force_open: m.force_open, multiplier: m.multiplier };
-    }).sort((a, b) => (a.kickoff_time || '').localeCompare(b.kickoff_time || ''));
-  }
-
-  function leaderboardRows(phase) {
-    const inPhase = (m) => {
-      if (!m) return false;
-      if (phase === 'group') return m.stage === 'Group Stage';
-      if (phase === 'knockout') return m.stage !== 'Group Stage';
-      return true; // overall
-    };
-    return users.filter((u) => !u.is_admin && (phase !== 'knockout' || u.knockout_eligible)).map((u) => {
-      const mine = predictions.filter((p) => p.user_id === u.id && inPhase(matches.find((x) => x.id === p.match_id)));
-      let total = 0, wins = 0, finished = 0;
-      mine.forEach((p) => {
-        const m = matches.find((x) => x.id === p.match_id);
-        if (p.points != null) total += p.points;
-        if (m && p.points === 2 * normMult(m.multiplier)) wins++;
-        if (m && m.status === 'finished') finished++;
-      });
-      if (phase !== 'group') {   // champion-pick bonus counts on knockout/overall boards
-        const cp = championPicks.find((p) => p.user_id === u.id);
-        if (cp && cp.points) total += cp.points;
-      }
-      return { display_name: u.display_name, username: u.username, total_points: r4(total), total_predictions: mine.length, wins, finished };
-    }).sort((a, b) => (b.total_points - a.total_points) || (b.wins - a.wins));
-  }
-
-  // ── tiny read-only SQL for the admin console (demo only) ────────────
-  function runQuery(sql) {
-    const raw = (sql || '').trim().replace(/;+\s*$/, '');
-    const low = raw.toLowerCase();
-    if (!low.startsWith('select') && !low.startsWith('with')) return err(400, 'อนุญาตเฉพาะคำสั่ง SELECT เท่านั้น');
-    if (/\b(insert|update|delete|drop|alter|create|replace|pragma)\b/.test(low)) return err(400, 'พบคำสั่งที่ไม่อนุญาต (read-only)');
-    const tables = {
-      users: () => users.map((u) => ({ id: u.id, username: u.username, display_name: u.display_name, is_admin: u.is_admin, knockout_eligible: u.knockout_eligible })),
-      teams: () => teams.map((t) => ({ id: t.id, name: t.name, flag: t.flag })),
-      matches: () => matches.map((m) => ({ id: m.id, team_home: m.team_home, team_away: m.team_away, stage: m.stage, handicap_team: m.handicap_team, handicap_value: m.handicap_value, kickoff_time: m.kickoff_time, score_home: m.score_home, score_away: m.score_away, status: m.status, locked: m.locked, force_open: m.force_open, multiplier: m.multiplier })),
-      predictions: () => predictions.map((p) => ({ id: p.id, user_id: p.user_id, match_id: p.match_id, predicted_winner: p.predicted_winner, points: p.points })),
-      leaderboard: () => leaderboardRows(),
-    };
-    const fm = low.match(/from\s+([a-z_]+)/);
-    if (!fm || !tables[fm[1]]) return err(400, 'เดโมรองรับ FROM: users, teams, matches, predictions, leaderboard');
-    let data = tables[fm[1]]();
-    const countMatch = low.match(/select\s+count\(/);
-    if (countMatch) {
-      return ok({ columns: ['count'], rows: [[data.length]], row_count: 1 });
-    }
-    const lim = low.match(/limit\s+(\d+)/);
-    if (lim) data = data.slice(0, parseInt(lim[1], 10));
-    const cols = data.length ? Object.keys(data[0]) : [];
-    return ok({ columns: cols, rows: data.map((r) => cols.map((c) => r[c])), row_count: data.length });
-  }
-
-  // ── router ──────────────────────────────────────────────────────────
-  function handle(method, path, opts) {
-    opts = opts || {};
-    const body = opts.body || {};
-    const me = opts.token ? userFromToken(opts.token) : null;
-    const [routePath, qs] = path.split('?');
-    const query = new URLSearchParams(qs || '');
-    path = routePath;
+  function handle(method, path, { body, form, token } = {}) {
+    const me = userFromToken(token);
+    const needAuth = () => (me ? null : err(401, 'Invalid token'));
+    const needAdmin = () => (me && me.is_admin ? null : err(403, 'Admin only'));
 
     if (method === 'POST' && path === '/token') {
-      const u = users.find((x) => x.username === (opts.form && opts.form.username));
-      if (!u || opts.form.password !== u.password) return err(400, 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
-      return ok({ access_token: tokenFor(u), token_type: 'bearer', display_name: u.display_name, is_admin: u.is_admin });
+      const u = users.find((x) => x.username === (form.username || '').trim());
+      if (!u || u.password !== form.password) return err(400, 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
+      return ok({ access_token: tokenOf(u), token_type: 'bearer', display_name: u.display_name, is_admin: u.is_admin });
     }
-    if (!me) return err(401, 'Invalid token');
 
-    if (method === 'GET' && path === '/me')
-      return ok({ id: me.id, username: me.username, display_name: me.display_name, is_admin: me.is_admin, knockout_eligible: !!me.knockout_eligible });
+    if (path === '/settings') return ok({ build: BUILD, cutoff_min: CUTOFF_MIN });
+
+    let g = needAuth(); if (g) return g;
+
+    if (method === 'GET' && path === '/me') {
+      const mine = bets.filter((b) => b.user_id === me.id && b.status !== 'void');
+      const settled = mine.filter((b) => b.status === 'settled');
+      return ok({
+        id: me.id, username: me.username, display_name: me.display_name, is_admin: me.is_admin,
+        credits: r2(me.credits), staked: r2(mine.reduce((s, b) => s + b.stake, 0)),
+        bets: mine.length, open_bets: mine.filter((b) => b.status === 'open').length,
+        net: r2(settled.reduce((s, b) => s + (b.payout - b.stake), 0)),
+      });
+    }
     if (method === 'POST' && path === '/me/update') {
-      if (body.display_name != null && body.display_name.trim()) me.display_name = body.display_name.trim();
+      if (body.display_name) me.display_name = body.display_name;
       if (body.password) me.password = body.password;
       return ok({ ok: true });
     }
-    if (method === 'GET' && path === '/stages') return ok(STAGES);
-    if (method === 'GET' && path === '/settings') return ok(displaySettings);
-    if (method === 'GET' && path === '/champion') {
-      const flagOf = (n) => { const t = teams.find((x) => x.name === n); return t ? t.flag : ''; };
-      const pool = (championCfg.teams || []).map((n) => ({ name: n, flag: flagOf(n) }));
-      const locked = !!championCfg.champion_team || Date.now() > new Date(championCfg.deadline).getTime();
-      const mine = championPicks.find((p) => p.user_id === me.id);
-      const nonAdmin = championPicks.filter((p) => { const u = users.find((x) => x.id === p.user_id); return u && !u.is_admin; });
-      const picks = locked ? nonAdmin.map((p) => {
-        const u = users.find((x) => x.id === p.user_id);
-        return { display_name: u.display_name, username: u.username, team: p.team, points: p.points };
-      }) : null;
-      return ok({ deadline: championCfg.deadline, points: championCfg.points, champion_team: championCfg.champion_team,
-                  locked, teams: pool, my_pick: mine ? mine.team : null, picks, total_picked: nonAdmin.length,
-                  eligible: !!me.is_admin || !!me.knockout_eligible });
+    if (path === '/stages') return ok(STAGES);
+    if (path === '/teams' && method === 'GET') return ok(teams.slice().sort((a, b) => a.name.localeCompare(b.name)));
+    if (path === '/matches' && method === 'GET') {
+      return ok(matches.slice().sort((a, b) => a.kickoff_time.localeCompare(b.kickoff_time)).map(decorate));
     }
-    if (method === 'POST' && path === '/champion/pick') {
-      if (championCfg.champion_team || Date.now() > new Date(championCfg.deadline).getTime()) return err(400, 'ปิดรับการทายแชมป์แล้ว');
-      if (!me.is_admin && !me.knockout_eligible) return err(403, 'คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้');
-      const mine = championPicks.find((p) => p.user_id === me.id);
-      if (mine) { mine.team = body.team; } else { championPicks.push({ user_id: me.id, team: body.team, points: null }); }
-      return ok({ ok: true, team: body.team });
+    if (path === '/bet_days' && method === 'GET') {
+      const days = {};
+      matches.forEach((m) => {
+        const d = (days[m.play_date] = days[m.play_date] || { play_date: m.play_date, matches: 0, finished: 0, first_kickoff: m.kickoff_time });
+        d.matches++;
+        if (m.status === 'finished') d.finished++;
+        if (m.kickoff_time < d.first_kickoff) d.first_kickoff = m.kickoff_time;
+      });
+      return ok(Object.values(days).sort((a, b) => a.play_date.localeCompare(b.play_date))
+        .map((d) => ({ ...d, status: dayStatus(d.play_date) })));
     }
-    if (method === 'GET' && path === '/teams') return ok([...teams].sort((a, b) => a.name.localeCompare(b.name)));
-    if (method === 'GET' && path === '/matches') return ok([...matches].sort((a, b) => a.kickoff_time.localeCompare(b.kickoff_time)).map(publicMatch));
-    if (method === 'GET' && path === '/predictions/mine') return ok(joinMine(me));
-    if (method === 'GET' && path === '/leaderboard') return ok(leaderboardRows(query.get('phase') || 'overall'));
+    if (path === '/bets/mine' && method === 'GET') {
+      return ok(bets.filter((b) => b.user_id === me.id).map((b) => {
+        const m = matches.find((x) => x.id === b.match_id) || {};
+        return { ...b, team_home: m.team_home, team_away: m.team_away,
+          team_home_flag: m.team_home_flag, team_away_flag: m.team_away_flag,
+          stage: m.stage, kickoff_time: m.kickoff_time, play_date: m.play_date,
+          score_home: m.score_home, score_away: m.score_away, match_status: m.status };
+      }).sort((a, b) => (b.kickoff_time || '').localeCompare(a.kickoff_time || '') || b.id - a.id));
+    }
+    if (path === '/ledger/mine' && method === 'GET') {
+      return ok(ledger.filter((l) => l.user_id === me.id).slice(0, 100));
+    }
+    if (path === '/leaderboard' && method === 'GET') {
+      return ok(users.filter((u) => !u.is_admin).map((u) => {
+        const mine = bets.filter((b) => b.user_id === u.id && b.status !== 'void');
+        const settled = mine.filter((b) => b.status === 'settled');
+        const open = mine.filter((b) => b.status === 'open');
+        return {
+          display_name: u.display_name, username: u.username, credits: r2(u.credits),
+          staked: r2(mine.reduce((s, b) => s + b.stake, 0)),
+          at_risk: r2(open.reduce((s, b) => s + b.stake, 0)),
+          net: r2(settled.reduce((s, b) => s + (b.payout - b.stake), 0)),
+          bets: mine.length,
+          wins: settled.filter((b) => b.outcome > 0).length,
+          losses: settled.filter((b) => b.outcome < 0).length,
+        };
+      }).sort((a, b) => (b.credits + b.at_risk) - (a.credits + a.at_risk) || b.net - a.net));
+    }
 
-    if (method === 'POST' && path === '/predictions') {
+    if (method === 'POST' && path === '/bets') {
       const m = matches.find((x) => x.id === body.match_id);
       if (!m) return err(404, 'ไม่พบนัดนี้');
-      if (m.stage !== 'Group Stage' && !me.knockout_eligible) return err(403, 'คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้');
-      if (m.status === 'finished') return err(400, 'นัดนี้จบไปแล้ว');
-      if (!m.force_open) {  // admin force-open bypasses lock/live/cutoff
-        if (m.locked) return err(400, 'แอดมินปิดรับการทายนัดนี้แล้ว');
-        if (m.status !== 'upcoming') return err(400, 'นัดนี้เริ่มไปแล้ว');
-        if (Date.now() >= new Date(m.kickoff_time).getTime() - 30 * MIN) return err(400, 'หมดเวลาทาย (ต้องส่งก่อน Kickoff 30 นาที)');
-      }
-      const ex = predictions.find((p) => p.user_id === me.id && p.match_id === body.match_id);
-      if (ex) ex.predicted_winner = body.predicted_winner;
-      else predictions.push({ id: pid++, user_id: me.id, match_id: body.match_id, predicted_winner: body.predicted_winner, points: null });
+      if (![m.team_home, m.team_away].includes(body.side)) return err(400, 'เลือกได้เฉพาะทีมในนัดนี้');
+      const stake = r2(Number(body.stake));
+      if (!(stake > 0)) return err(400, 'จำนวนเงินต้องมากกว่า 0');
+      const reason = betGate(m);
+      if (reason) return err(400, reason);
+      if (me.credits < stake) return err(400, `เครดิตไม่พอ (คงเหลือ ${r2(me.credits)})`);
+      const b = placeDemoBet(me, m, body.side, stake);
+      return ok({ ok: true, bet_id: b.id, credits: me.credits, line_taken: b.line_taken, odds_taken: b.odds_taken });
+    }
+    if (method === 'DELETE' && path.startsWith('/bets/')) {
+      const b = bets.find((x) => x.id === +path.split('/')[2]);
+      if (!b || (b.user_id !== me.id && !me.is_admin)) return err(404, 'ไม่พบบิลนี้');
+      if (b.status !== 'open') return err(400, 'บิลนี้ปิดไปแล้ว');
+      const m = matches.find((x) => x.id === b.match_id);
+      if (m && betGate(m)) return err(400, 'ปิดรับพนันแล้ว — ยกเลิกไม่ได้');
+      b.status = 'void';
+      const u = users.find((x) => x.id === b.user_id);
+      return ok({ ok: true, credits: move(u, b.stake, 'refund', 'ยกเลิกบิล', b.id) });
+    }
+    if (method === 'GET' && /^\/matches\/\d+\/odds_history$/.test(path)) return ok([]);
+    if (method === 'GET' && /^\/matches\/\d+\/bets$/.test(path)) {
+      const m = matches.find((x) => x.id === +path.split('/')[2]);
+      if (!m) return err(404, 'ไม่พบนัด');
+      if (betGate(m) === null && !me.is_admin) return ok({ revealed: false, bets: [] });
+      return ok({ revealed: true, bets: bets.filter((b) => b.match_id === m.id && b.status !== 'void').map((b) => ({
+        display_name: (users.find((u) => u.id === b.user_id) || {}).display_name,
+        side: b.side, stake: b.stake, line_taken: b.line_taken, odds_taken: b.odds_taken,
+        status: b.status, outcome: b.outcome, payout: b.payout })) });
+    }
+
+    // ── admin ────────────────────────────────────────────────────────
+    g = needAdmin(); if (g) return g;
+
+    if (path === '/admin/users' && method === 'GET') {
+      return ok(users.map((u) => ({
+        id: u.id, username: u.username, display_name: u.display_name, is_admin: u.is_admin,
+        credits: r2(u.credits),
+        staked: r2(bets.filter((b) => b.user_id === u.id && b.status !== 'void').reduce((s, b) => s + b.stake, 0)),
+        open_bets: bets.filter((b) => b.user_id === u.id && b.status === 'open').length,
+      })));
+    }
+    if (path === '/admin/users' && method === 'POST') {
+      if (users.some((u) => u.username === body.username.trim())) return err(400, 'ชื่อผู้ใช้นี้มีอยู่แล้ว');
+      addUser(body.username.trim(), body.display_name.trim(), body.password, 0, Number(body.credits) || 0);
       return ok({ ok: true });
     }
-
-    // ── admin only below ──
-    if (!me.is_admin) return err(403, 'Admin only');
-
-    if (method === 'PUT' && path === '/admin/champion') {
-      if (body.deadline != null) championCfg.deadline = body.deadline;
-      if (body.points != null) championCfg.points = Number(body.points);
-      if (body.champion_team != null) championCfg.champion_team = body.champion_team || null;
-      let removed = 0;
-      if (body.teams != null) {
-        const seen = {}, clean = [];
-        body.teams.forEach((n) => { n = (n || '').trim(); if (n && !seen[n]) { seen[n] = 1; clean.push(n); } });
-        championCfg.teams = clean;
-        if (!championCfg.champion_team) {   // drop picks whose team was removed
-          for (let i = championPicks.length - 1; i >= 0; i--) {
-            if (!clean.includes(championPicks[i].team)) { championPicks.splice(i, 1); removed++; }
-          }
-        }
-      }
-      let awarded = 0;
-      championPicks.forEach((p) => {
-        if (championCfg.champion_team) { p.points = p.team === championCfg.champion_team ? championCfg.points : 0; if (p.points > 0) awarded++; }
-        else p.points = null;
-      });
-      return ok({ ok: true, ...championCfg, awarded, removed });
-    }
-    if (method === 'PUT' && path === '/admin/settings') {
-      const HOME_KEYS = ['knockout', 'overall', 'wins'], LB_KEYS = ['overall', 'group', 'knockout'];
-      const home_stats = (body.home_stats || []).filter((k) => HOME_KEYS.includes(k));
-      const lb_tabs = (body.lb_tabs || []).filter((k) => LB_KEYS.includes(k));
-      if (!lb_tabs.length) return err(400, 'ต้องเปิดอย่างน้อย 1 แท็บตารางคะแนน');
-      displaySettings = { home_stats, lb_tabs };
-      return ok({ ok: true, ...displaySettings });
-    }
-
-    if (method === 'GET' && path === '/admin/users')
-      return ok(users.map((u) => ({ id: u.id, username: u.username, display_name: u.display_name, is_admin: u.is_admin, knockout_eligible: !!u.knockout_eligible })).sort((a, b) => b.is_admin - a.is_admin || a.id - b.id));
-    if (method === 'POST' && path === '/admin/users') {
-      if (users.some((x) => x.username === (body.username || '').trim())) return err(400, 'ชื่อผู้ใช้นี้มีอยู่แล้ว');
-      users.push({ id: uid++, username: (body.username || '').trim(), display_name: (body.display_name || '').trim(), password: body.password, is_admin: 0, knockout_eligible: body.knockout_eligible === false ? 0 : 1 });
-      return ok({ ok: true });
-    }
-    if (method === 'DELETE' && path.startsWith('/admin/users/')) {
-      const id = parseInt(path.split('/')[3], 10);
-      const u = users.find((x) => x.id === id);
-      if (u && u.is_admin) return err(400, 'ลบผู้ดูแลระบบไม่ได้');
-      const i = users.findIndex((x) => x.id === id);
+    if (path.startsWith('/admin/users/') && method === 'DELETE') {
+      const id = +path.split('/')[3];
+      const t = users.find((u) => u.id === id);
+      if (t && t.is_admin) return err(400, 'ลบผู้ดูแลระบบไม่ได้');
+      const i = users.findIndex((u) => u.id === id);
       if (i >= 0) users.splice(i, 1);
-      for (let k = predictions.length - 1; k >= 0; k--) if (predictions[k].user_id === id) predictions.splice(k, 1);
       return ok({ ok: true });
     }
-    if (method === 'PUT' && path.startsWith('/admin/users/')) {
-      const id = parseInt(path.split('/')[3], 10);
-      const u = users.find((x) => x.id === id);
-      if (!u) return err(404, 'ไม่พบผู้ใช้');
-      if (body.display_name != null && body.display_name.trim()) u.display_name = body.display_name.trim();
-      if (body.password) u.password = body.password;
-      if (body.knockout_eligible != null) u.knockout_eligible = body.knockout_eligible ? 1 : 0;
+    if (path.startsWith('/admin/users/') && method === 'PUT') {
+      const t = users.find((u) => u.id === +path.split('/')[3]);
+      if (!t) return err(404, 'ไม่พบผู้ใช้');
+      if (body.display_name) t.display_name = body.display_name;
+      if (body.password) t.password = body.password;
       return ok({ ok: true });
+    }
+    if (path === '/admin/credits' && method === 'POST') {
+      const t = users.find((u) => u.id === body.user_id);
+      if (!t) return err(404, 'ไม่พบผู้ใช้');
+      const amt = Number(body.amount);
+      if (!amt) return err(400, 'จำนวนเครดิตต้องไม่เป็นศูนย์');
+      if (amt < 0 && t.credits + amt < 0) return err(400, 'ดึงเครดิตคืนเกินยอดคงเหลือไม่ได้');
+      return ok({ ok: true, credits: move(t, amt, amt > 0 ? 'topup' : 'adjust', body.note || '') });
+    }
+    if (path === '/admin/ledger' && method === 'GET') return ok(ledger.slice(0, 200));
+
+    if (path === '/admin/bet_days' && method === 'PUT') {
+      if (!matches.some((m) => m.play_date === body.play_date)) return err(404, 'ไม่มีนัดในวันนี้');
+      betDays[body.play_date] = body.status;
+      return ok({ ok: true, play_date: body.play_date, status: body.status });
     }
 
-    if (method === 'POST' && path === '/teams') {
-      const name = (body.name || '').trim();
-      const ex = teams.find((t) => t.name === name);
-      if (ex) ex.flag = (body.flag || '').trim();
-      else teams.push({ id: tid++, name, flag: (body.flag || '').trim() });
+    if (path === '/matches' && method === 'POST') {
+      const m = addMatch(body.team_home, body.team_away, body.handicap_team, body.handicap_value,
+        Number(body.odds_home) || 1.9, Number(body.odds_away) || 1.9,
+        new Date(body.kickoff_time).getTime(), body.stage);
+      return ok({ ok: true, id: m.id });
+    }
+    if (path.startsWith('/matches/') && path.endsWith('/odds') && method === 'PUT') {
+      const m = matches.find((x) => x.id === +path.split('/')[2]);
+      if (!m) return err(404, 'ไม่พบนัด');
+      if (betGate(m)) return err(400, 'ปิดรับพนันแล้ว — แก้ราคาไม่ได้');
+      if (body.handicap_team) m.handicap_team = body.handicap_team;
+      if (body.handicap_value != null) m.handicap_value = Number(body.handicap_value);
+      if (body.odds_home != null) m.odds_home = Number(body.odds_home);
+      if (body.odds_away != null) m.odds_away = Number(body.odds_away);
+      return ok({ ok: true, ...m });
+    }
+    if (path.startsWith('/matches/') && method === 'DELETE') {
+      const id = +path.split('/')[2];
+      let refunded = 0;
+      bets.filter((b) => b.match_id === id && b.status === 'open').forEach((b) => {
+        move(users.find((u) => u.id === b.user_id), b.stake, 'refund', `ยกเลิกนัด #${id}`, b.id);
+        b.status = 'void'; refunded++;
+      });
+      const i = matches.findIndex((m) => m.id === id);
+      if (i >= 0) matches.splice(i, 1);
+      return ok({ ok: true, refunded });
+    }
+    if (path.startsWith('/matches/') && method === 'PUT') {
+      const m = matches.find((x) => x.id === +path.split('/')[2]);
+      if (!m) return err(404, 'ไม่พบนัด');
+      ['handicap_team', 'handicap_value', 'stage'].forEach((k) => { if (body[k] != null) m[k] = body[k]; });
+      if (body.kickoff_time) { m.kickoff_time = body.kickoff_time; m.play_date = playDateOf(body.kickoff_time); }
       return ok({ ok: true });
     }
-    if (method === 'DELETE' && path.startsWith('/teams/')) {
-      const id = parseInt(path.split('/')[2], 10);
-      const i = teams.findIndex((t) => t.id === id);
+    if (path === '/admin/result' && method === 'POST') {
+      const m = matches.find((x) => x.id === body.match_id);
+      if (!m) return err(404, 'ไม่พบนัด');
+      return ok({ ok: true, settled: settle(m, body.score_home, body.score_away, true) });
+    }
+    if (path === '/admin/results_batch' && method === 'POST') {
+      let n = 0;
+      (body.results || []).forEach((it) => {
+        const m = matches.find((x) => x.id === it.match_id);
+        if (m) { settle(m, it.score_home, it.score_away, it.final); n++; }
+      });
+      return ok({ ok: true, matches: n, detail: [] });
+    }
+    if (path === '/admin/lock' && method === 'POST') {
+      const m = matches.find((x) => x.id === body.match_id);
+      if (m) { m.locked = body.locked ? 1 : 0; m.force_open = body.locked ? 0 : 1; }
+      return ok({ ok: true });
+    }
+    if (path === '/teams' && method === 'POST') {
+      const t = teams.find((x) => x.name === body.name.trim());
+      if (t) t.flag = body.flag.trim();
+      else teams.push({ id: tid++, name: body.name.trim(), flag: body.flag.trim() });
+      return ok({ ok: true });
+    }
+    if (path.startsWith('/teams/') && method === 'DELETE') {
+      const i = teams.findIndex((x) => x.id === +path.split('/')[2]);
       if (i >= 0) teams.splice(i, 1);
       return ok({ ok: true });
     }
-
-    if (method === 'POST' && path === '/matches') {
-      addMatch({ team_home: body.team_home, team_away: body.team_away,
-        team_home_flag: body.team_home_flag || regFlag(body.team_home),
-        team_away_flag: body.team_away_flag || regFlag(body.team_away),
-        stage: body.stage || 'Group Stage', handicap_team: body.handicap_team,
-        handicap_value: body.handicap_value, kickoff_time: body.kickoff_time,
-        multiplier: normMult(body.multiplier) });
-      return ok({ ok: true });
+    if (path === '/admin/apifootball/fixtures') {
+      return ok({ ok: true, provider: 'demo', count: 0, dates: [], fixtures: [], note: 'โหมดเดโม — ไม่มีข้อมูลจริง' });
     }
-    if (method === 'DELETE' && path.startsWith('/matches/')) {
-      const id = parseInt(path.split('/')[2], 10);
-      const i = matches.findIndex((m) => m.id === id);
-      if (i >= 0) matches.splice(i, 1);
-      for (let k = predictions.length - 1; k >= 0; k--) if (predictions[k].match_id === id) predictions.splice(k, 1);
-      return ok({ ok: true });
-    }
-    if (method === 'POST' && path === '/admin/result') {
-      const m = matches.find((x) => x.id === body.match_id);
-      if (!m) return err(404, 'ไม่พบนัด');
-      m.score_home = body.score_home; m.score_away = body.score_away; m.status = 'finished'; m.locked = 1;
-      const ps = predictions.filter((p) => p.match_id === m.id);
-      ps.forEach((p) => { p.points = scoredPoints(m, p.predicted_winner); });
-      return ok({ ok: true, updated: ps.length });
-    }
-    if (method === 'POST' && path === '/admin/lock') {
-      const m = matches.find((x) => x.id === body.match_id);
-      if (m) { if (body.locked) { m.locked = 1; m.force_open = 0; } else { m.locked = 0; m.force_open = 1; } }
-      return ok({ ok: true });
-    }
-    if (method === 'GET' && path === '/admin/fetch_scores') {
-      // demo has no external API — return an empty match set
-      return ok({ ok: true, date: new Date().toISOString().slice(0, 10), fetched: 0, matched: [] });
-    }
-    if (method === 'POST' && path === '/admin/results_batch') {
-      let count = 0;
-      (body.results || []).forEach((it) => {
-        const m = matches.find((x) => x.id === it.match_id);
-        if (!m) return;
-        m.score_home = it.score_home; m.score_away = it.score_away;
-        m.status = it.final ? 'finished' : 'live'; m.locked = 1;
-        predictions.filter((p) => p.match_id === m.id).forEach((p) => { p.points = scoredPoints(m, p.predicted_winner); });
-        count++;
-      });
-      return ok({ ok: true, matches: count, detail: [] });
-    }
-    if (method === 'PUT' && path.startsWith('/matches/')) {
-      const id = parseInt(path.split('/')[2], 10);
-      const m = matches.find((x) => x.id === id);
-      if (!m) return err(404, 'ไม่พบนัด');
-      ['handicap_team', 'handicap_value', 'kickoff_time', 'stage', 'multiplier'].forEach((c) => {
-        if (body[c] != null) m[c] = c === 'handicap_value' ? Number(body[c]) : (c === 'multiplier' ? normMult(body[c]) : body[c]);
-      });
-      let recomputed = 0;
-      if (m.score_home != null && m.score_away != null)
-        predictions.filter((p) => p.match_id === m.id).forEach((p) => { p.points = scoredPoints(m, p.predicted_winner); recomputed++; });
-      return ok({ ok: true, recomputed });
-    }
-    if (method === 'POST' && path === '/admin/query') return runQuery(body.sql);
-    if (method === 'POST' && path === '/admin/update_cell') {
-      const EDIT = {
-        users: ['display_name', 'username', 'is_admin', 'knockout_eligible'],
-        teams: ['name', 'flag'],
-        matches: ['team_home', 'team_away', 'team_home_flag', 'team_away_flag', 'stage', 'handicap_team', 'handicap_value', 'kickoff_time', 'score_home', 'score_away', 'status', 'locked', 'force_open', 'multiplier'],
-        predictions: ['predicted_winner', 'points'],
-      };
-      const arrs = { users, teams, matches, predictions };
-      const cols = EDIT[body.table];
-      if (!cols || !cols.includes(body.column) || !arrs[body.table]) return err(400, 'แก้ไขคอลัมน์นี้ไม่ได้');
-      const row = arrs[body.table].find((x) => x.id === body.id);
-      if (!row) return err(404, 'ไม่พบแถว');
-      let v = body.value;
-      if (['handicap_value', 'score_home', 'score_away', 'points', 'locked', 'force_open', 'is_admin', 'knockout_eligible', 'multiplier'].includes(body.column))
-        v = v === '' || v == null ? null : Number(v);
-      row[body.column] = v;
-      return ok({ ok: true });
+    if (path === '/admin/apifootball/map') return ok({ ok: true });
+    if (path === '/admin/fetch_scores') return ok({ ok: true, fetched: 0, matched: [], note: 'โหมดเดโม' });
+    if (path === '/admin/query' && method === 'POST') {
+      const sql = (body.sql || '').trim().toLowerCase();
+      if (!sql.startsWith('select') && !sql.startsWith('with')) return err(400, 'อนุญาตเฉพาะคำสั่ง SELECT เท่านั้น');
+      if (sql.includes('users')) {
+        return ok({ columns: ['display_name', 'credits'],
+          rows: users.map((u) => [u.display_name, u.credits]), row_count: users.length });
+      }
+      if (sql.includes('bets')) {
+        return ok({ columns: ['id', 'side', 'stake', 'odds_taken', 'status'],
+          rows: bets.map((b) => [b.id, b.side, b.stake, b.odds_taken, b.status]), row_count: bets.length });
+      }
+      return ok({ columns: ['note'], rows: [['โหมดเดโม — คิวรีจำลอง']], row_count: 1 });
     }
 
-    return err(404, 'Not found');
+    return err(404, 'ไม่พบ endpoint นี้ (โหมดเดโม)');
   }
 
-  window.DemoServer = { handle, calcPoints };
+  window.DemoServer = { handle };
 })();

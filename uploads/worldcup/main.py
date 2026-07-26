@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -13,7 +13,7 @@ SECRET_KEY = "worldcup2026-secret-key-change-in-production"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 
-app = FastAPI(title="World Cup Prediction")
+app = FastAPI(title="Event For Friend · Credit Betting")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -21,45 +21,28 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 DB_PATH = os.path.join(os.environ.get("DATA_DIR", "."), "worldcup.db")
 
-STAGES = ["Group Stage", "Round of 32", "Round of 16", "Quarter-finals",
-          "Semi-finals", "Third-Place Play-off", "The Final"]
-
-# Admin-configurable: which stat boxes show on the home hero, and which tabs
-# show on the leaderboard. Stored as one JSON row in `settings` so it survives
-# restarts without a schema change.
-HOME_STAT_KEYS = ["knockout", "overall", "wins"]
-LB_TAB_KEYS = ["overall", "group", "knockout"]
-DEFAULT_DISPLAY_SETTINGS = {"home_stats": list(HOME_STAT_KEYS), "lb_tabs": list(LB_TAB_KEYS)}
+STAGES = ["Group Stage", "Semi-finals", "The Final"]
 
 # Bumped every deploy IN LOCKSTEP with the ?v= asset query in index.html and the
 # BUILD constant in app.js. The client compares this to its own build and force-
 # reloads once when they differ, so a stale cached bundle self-heals.
-APP_BUILD = "15"
+APP_BUILD = "16"
 
-# Champion prediction: pick one team (from an admin-managed shortlist) to win
-# the title before the deadline (Bangkok time). Correct pick = bonus points on
-# the knockout/overall boards. The admin curates `teams` — e.g. start with the
-# last 16 and trim losers down to 8.
-DEFAULT_CHAMPION_CFG = {"deadline": "2026-07-09T23:59:59", "points": 4.0, "champion_team": None, "teams": []}
+# Betting closes this many minutes before kickoff. Odds may keep moving right up
+# to the same moment — after it, the match is frozen for everyone.
+BET_CUTOFF_MIN = int(os.environ.get("BET_CUTOFF_MIN", "10"))
 
-# Pre-defined teams (name -> flag image URL via flagcdn). Admin can edit/add later.
+# Schema generation marker. Bumping this wipes the *event* data (matches, bets,
+# ledger, credits) exactly once on the next boot, so the app can be re-pointed at
+# a new tournament without hand-editing the database. User accounts and the team
+# registry are deliberately preserved — delete those from the admin screen.
+SCHEMA_VERSION = "v2-credits"
+
+# ASEAN Championship 2026 (ASEAN Hyundai Cup) — the 10 participating nations.
 TEAM_SEED = [
-    ("Argentina", "ar"), ("Brazil", "br"), ("France", "fr"), ("England", "gb-eng"),
-    ("Spain", "es"), ("Germany", "de"), ("Portugal", "pt"), ("Netherlands", "nl"),
-    ("Italy", "it"), ("Belgium", "be"), ("Croatia", "hr"), ("Uruguay", "uy"),
-    ("Mexico", "mx"), ("USA", "us"), ("Canada", "ca"), ("Japan", "jp"),
-    ("South Korea", "kr"), ("Australia", "au"), ("Morocco", "ma"), ("Senegal", "sn"),
-    ("Ghana", "gh"), ("Nigeria", "ng"), ("Cameroon", "cm"), ("Ivory Coast", "ci"),
-    ("Saudi Arabia", "sa"), ("Iran", "ir"), ("Qatar", "qa"), ("Switzerland", "ch"),
-    ("Denmark", "dk"), ("Poland", "pl"), ("Serbia", "rs"), ("Wales", "gb-wls"),
-    ("Scotland", "gb-sct"), ("Ecuador", "ec"), ("Colombia", "co"), ("Peru", "pe"),
-    ("Chile", "cl"), ("Paraguay", "py"), ("Venezuela", "ve"), ("Costa Rica", "cr"),
-    ("Panama", "pa"), ("Jamaica", "jm"), ("Honduras", "hn"), ("Austria", "at"),
-    ("Sweden", "se"), ("Norway", "no"), ("Turkey", "tr"), ("Ukraine", "ua"),
-    ("Czech Republic", "cz"), ("Hungary", "hu"), ("Greece", "gr"), ("Egypt", "eg"),
-    ("Algeria", "dz"), ("Tunisia", "tn"), ("South Africa", "za"), ("Mali", "ml"),
-    ("New Zealand", "nz"), ("Uzbekistan", "uz"), ("Iraq", "iq"), ("UAE", "ae"),
-    ("Jordan", "jo"), ("Thailand", "th"), ("Vietnam", "vn"),
+    ("Thailand", "th"), ("Vietnam", "vn"), ("Indonesia", "id"), ("Malaysia", "my"),
+    ("Singapore", "sg"), ("Philippines", "ph"), ("Myanmar", "mm"), ("Cambodia", "kh"),
+    ("Laos", "la"), ("Timor-Leste", "tl"), ("Brunei", "bn"),
 ]
 def flag_url(iso): return f"https://flagcdn.com/w80/{iso}.png"
 
@@ -79,6 +62,7 @@ def init_db():
             display_name TEXT NOT NULL,
             password_hash TEXT NOT NULL,
             is_admin INTEGER DEFAULT 0,
+            credits REAL NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS teams (
@@ -86,6 +70,22 @@ def init_db():
             name TEXT UNIQUE NOT NULL,
             flag TEXT DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        -- One row per calendar day (Bangkok). The admin opens/closes a whole
+        -- matchday at a time; individual matches still close on their own
+        -- BET_CUTOFF_MIN before kickoff.
+        CREATE TABLE IF NOT EXISTS bet_days (
+            play_date TEXT PRIMARY KEY,          -- 'YYYY-MM-DD' Bangkok
+            status    TEXT NOT NULL DEFAULT 'draft',   -- draft | open | closed
+            opened_at TEXT,
+            closed_at TEXT,
+            opened_by INTEGER
+        );
+
         CREATE TABLE IF NOT EXISTS matches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             team_home TEXT NOT NULL,
@@ -93,68 +93,138 @@ def init_db():
             team_home_flag TEXT DEFAULT '',
             team_away_flag TEXT DEFAULT '',
             stage TEXT DEFAULT 'Group Stage',
-            handicap_team TEXT NOT NULL,
-            handicap_value REAL NOT NULL,
-            kickoff_time TEXT NOT NULL,
+            handicap_team TEXT NOT NULL,         -- the team giving the goals
+            handicap_value REAL NOT NULL,        -- the line, e.g. 0.5 / 0.25
+            odds_home REAL NOT NULL DEFAULT 1.90,-- decimal odds (payout multiplier)
+            odds_away REAL NOT NULL DEFAULT 1.90,
+            kickoff_time TEXT NOT NULL,          -- 'YYYY-MM-DDTHH:MM' Bangkok
+            play_date TEXT,                      -- derived from kickoff_time
             score_home INTEGER,
             score_away INTEGER,
-            status TEXT DEFAULT 'upcoming',
+            status TEXT DEFAULT 'upcoming',      -- upcoming | live | finished
             locked INTEGER DEFAULT 0,
             force_open INTEGER DEFAULT 0,
-            multiplier INTEGER DEFAULT 1,
+            apifootball_fixture_id INTEGER,
             created_at TEXT DEFAULT (datetime('now'))
         );
-        CREATE TABLE IF NOT EXISTS predictions (
+
+        -- Every stake ever placed. line_taken / odds_taken are frozen copies of
+        -- the match terms AT THE MOMENT OF THE BET — settlement reads only these,
+        -- never the live match row, so later odds moves cannot rewrite history.
+        CREATE TABLE IF NOT EXISTS bets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            user_id  INTEGER NOT NULL,
             match_id INTEGER NOT NULL,
-            predicted_winner TEXT NOT NULL,
-            points REAL,
-            created_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(user_id, match_id),
+            side TEXT NOT NULL,                  -- team name the user backed
+            stake REAL NOT NULL,
+            hdcp_team_taken TEXT NOT NULL,
+            line_taken REAL NOT NULL,
+            odds_taken REAL NOT NULL,
+            placed_at TEXT DEFAULT (datetime('now')),
+            status TEXT NOT NULL DEFAULT 'open', -- open | settled | void
+            outcome REAL,                        -- -1 / -0.5 / 0 / 0.5 / 1
+            payout REAL,                         -- credits returned (0 = lost all)
+            settled_at TEXT,
             FOREIGN KEY(user_id) REFERENCES users(id),
             FOREIGN KEY(match_id) REFERENCES matches(id)
         );
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS champion_picks (
+        CREATE INDEX IF NOT EXISTS idx_bets_user  ON bets(user_id);
+        CREATE INDEX IF NOT EXISTS idx_bets_match ON bets(match_id);
+
+        -- Append-only audit of every credit movement.
+        CREATE TABLE IF NOT EXISTS credit_ledger (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER UNIQUE NOT NULL,
-            team TEXT NOT NULL,
-            picked_at TEXT DEFAULT (datetime('now')),
-            points REAL,
+            user_id INTEGER NOT NULL,
+            delta REAL NOT NULL,
+            balance_after REAL NOT NULL,
+            reason TEXT NOT NULL,                -- topup | adjust | bet | payout | refund
+            note TEXT DEFAULT '',
+            bet_id INTEGER,
+            admin_id INTEGER,
+            created_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY(user_id) REFERENCES users(id)
         );
+        CREATE INDEX IF NOT EXISTS idx_ledger_user ON credit_ledger(user_id);
+
+        -- Every odds move, so the admin can see how a price drifted.
+        CREATE TABLE IF NOT EXISTS odds_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id INTEGER NOT NULL,
+            handicap_team TEXT NOT NULL,
+            handicap_value REAL NOT NULL,
+            odds_home REAL NOT NULL,
+            odds_away REAL NOT NULL,
+            source TEXT DEFAULT 'admin',
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_odds_match ON odds_history(match_id);
     """)
+
     # seed admin
     if not c.execute("SELECT id FROM users WHERE username='admin'").fetchone():
         c.execute("INSERT INTO users (username, display_name, password_hash, is_admin) VALUES (?,?,?,1)",
                   ("admin", "น้องปอนด์ (Admin)", pwd_context.hash("admin1234")))
-    # migrate: add columns to existing databases if missing
-    cols = {r["name"] for r in c.execute("PRAGMA table_info(matches)").fetchall()}
-    for col, ddl in [("team_home_flag", "TEXT DEFAULT ''"), ("team_away_flag", "TEXT DEFAULT ''"),
-                     ("stage", "TEXT DEFAULT 'Group Stage'"), ("locked", "INTEGER DEFAULT 0"),
-                     ("apifootball_fixture_id", "INTEGER"), ("multiplier", "INTEGER DEFAULT 1"),
+
+    # migrate older databases forward (columns added since the points era)
+    ucols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
+    if "credits" not in ucols:
+        c.execute("ALTER TABLE users ADD COLUMN credits REAL NOT NULL DEFAULT 0")
+    mcols = {r["name"] for r in c.execute("PRAGMA table_info(matches)").fetchall()}
+    for col, ddl in [("odds_home", "REAL NOT NULL DEFAULT 1.90"),
+                     ("odds_away", "REAL NOT NULL DEFAULT 1.90"),
+                     ("play_date", "TEXT"),
+                     ("apifootball_fixture_id", "INTEGER"),
                      ("force_open", "INTEGER DEFAULT 0")]:
-        if col not in cols:
+        if col not in mcols:
             c.execute(f"ALTER TABLE matches ADD COLUMN {col} {ddl}")
-    user_cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
-    if "knockout_eligible" not in user_cols:
-        # existing players keep playing knockout by default; admin opts specific
-        # users out (left the group) or in (joined fresh) per round from here.
-        c.execute("ALTER TABLE users ADD COLUMN knockout_eligible INTEGER DEFAULT 1")
-    # seed teams registry
+
+    # one-time wipe of the previous tournament's event data
+    row = c.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
+    if not row or row["value"] != SCHEMA_VERSION:
+        for stmt in ("DROP TABLE IF EXISTS predictions",
+                     "DROP TABLE IF EXISTS champion_picks",
+                     "DELETE FROM bets", "DELETE FROM credit_ledger",
+                     "DELETE FROM odds_history", "DELETE FROM matches",
+                     "DELETE FROM bet_days", "UPDATE users SET credits=0",
+                     "DELETE FROM settings WHERE key IN ('display','champion')"):
+            try:
+                c.execute(stmt)
+            except sqlite3.Error:
+                pass
+        c.execute("INSERT INTO settings (key, value) VALUES ('schema_version', ?) "
+                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (SCHEMA_VERSION,))
+        print(f"[init] event data reset for {SCHEMA_VERSION} (users & teams kept)", flush=True)
+
+    # seed the team registry
     if not c.execute("SELECT id FROM teams LIMIT 1").fetchone():
         for name, iso in TEAM_SEED:
             c.execute("INSERT OR IGNORE INTO teams (name, flag) VALUES (?,?)", (name, flag_url(iso)))
-    # seed display settings (which home stat boxes / leaderboard tabs admin shows)
-    if not c.execute("SELECT key FROM settings WHERE key='display'").fetchone():
-        c.execute("INSERT INTO settings (key, value) VALUES ('display', ?)",
-                  (json.dumps(DEFAULT_DISPLAY_SETTINGS),))
+
+    # backfill play_date for any match that predates the column
+    for m in c.execute("SELECT id, kickoff_time FROM matches WHERE play_date IS NULL").fetchall():
+        c.execute("UPDATE matches SET play_date=? WHERE id=?",
+                  (_play_date_of(m["kickoff_time"]), m["id"]))
+
     conn.commit()
     conn.close()
+
+# ─── Time helpers (all stored times are Bangkok-local, naive) ────────────────
+def _now_bkk() -> datetime:
+    return datetime.utcnow() + timedelta(hours=7)
+
+def _ko_bkk(s: str):
+    """Parse a stored kickoff_time as a Bangkok-local naive datetime."""
+    s = (s or "").replace(" ", "T")
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+def _play_date_of(kickoff: str) -> Optional[str]:
+    ko = _ko_bkk(kickoff)
+    return ko.strftime("%Y-%m-%d") if ko else None
 
 init_db()
 
@@ -188,7 +258,7 @@ class UserIn(BaseModel):
     username: str
     display_name: str
     password: str
-    knockout_eligible: bool = True
+    credits: float = 0
 
 class ProfileIn(BaseModel):
     display_name: Optional[str] = None
@@ -197,7 +267,11 @@ class ProfileIn(BaseModel):
 class UserEditIn(BaseModel):
     display_name: Optional[str] = None
     password: Optional[str] = None
-    knockout_eligible: Optional[bool] = None
+
+class CreditIn(BaseModel):
+    user_id: int
+    amount: float                 # positive = top-up, negative = take back
+    note: str = ""
 
 class CellIn(BaseModel):
     table: str
@@ -217,19 +291,26 @@ class MatchIn(BaseModel):
     stage: str = "Group Stage"
     handicap_team: str
     handicap_value: float
+    odds_home: float = 1.90
+    odds_away: float = 1.90
     kickoff_time: str
-    multiplier: int = 1
 
 class MatchEditIn(BaseModel):
     handicap_team: Optional[str] = None
     handicap_value: Optional[float] = None
     kickoff_time: Optional[str] = None
     stage: Optional[str] = None
-    multiplier: Optional[int] = None
 
-class PredictionIn(BaseModel):
+class OddsIn(BaseModel):
+    handicap_team: Optional[str] = None
+    handicap_value: Optional[float] = None
+    odds_home: Optional[float] = None
+    odds_away: Optional[float] = None
+
+class BetIn(BaseModel):
     match_id: int
-    predicted_winner: str
+    side: str                     # team name being backed
+    stake: float
 
 class ResultIn(BaseModel):
     match_id: int
@@ -240,7 +321,7 @@ class ScoreItem(BaseModel):
     match_id: int
     score_home: int
     score_away: int
-    final: bool = False          # True = match over (finalize); False = live/in-progress
+    final: bool = False
 
 class BatchResultIn(BaseModel):
     results: List[ScoreItem]
@@ -249,108 +330,152 @@ class LockIn(BaseModel):
     match_id: int
     locked: int
 
+class DayIn(BaseModel):
+    play_date: str
+    status: str                   # draft | open | closed
+
 class QueryIn(BaseModel):
     sql: str
 
 class MapIn(BaseModel):
     match_id: int
-    fixture_id: Optional[int] = None   # None / null = clear the mapping
+    fixture_id: Optional[int] = None
 
-class DisplaySettingsIn(BaseModel):
-    home_stats: List[str]
-    lb_tabs: List[str]
+# ─── Asian-handicap settlement ───────────────────────────────
+MIN_ODDS, MAX_ODDS = 1.01, 20.0
 
-class ChampionPickIn(BaseModel):
-    team: str
-
-class ChampionCfgIn(BaseModel):
-    deadline: Optional[str] = None       # Bangkok-local, e.g. 2026-07-09T23:59
-    points: Optional[float] = None       # bonus for a correct pick
-    champion_team: Optional[str] = None  # set = declare the champion (awards points); "" = clear
-    teams: Optional[List[str]] = None    # admin-managed shortlist of pickable teams (replaces the whole list)
-
-# ─── Scoring logic (Asian Handicap) ──────────────────────────
-def calc_points(match: dict, predicted_winner: str) -> float:
-    h, a = match["score_home"], match["score_away"]
-    hv = match["handicap_value"]
-    ht = match["handicap_team"]
-
-    if ht == match["team_home"]:
-        raw_diff = float(h - a)
-    else:
-        raw_diff = float(a - h)
-
-    def score_single_line(raw, line):
-        d = round(raw - line, 4)
-        if line % 1 == 0.0:
-            if d > 0:  return 2.0
-            if d == 0: return 1.0
-            return 0.0
-        else:
-            return 2.0 if d > 0 else 0.0
-
-    frac = round(hv % 1, 2)
-    if frac in (0.25, 0.75):
-        s = (score_single_line(raw_diff, hv - 0.25) + score_single_line(raw_diff, hv + 0.25)) / 2
-    else:
-        s = score_single_line(raw_diff, hv)
-
-    return s if predicted_winner == ht else 2.0 - s
-
-ALLOWED_MULTIPLIERS = (1, 2, 4)
-def norm_multiplier(m) -> int:
-    """Clamp a match multiplier to an allowed value; anything odd falls back to 1."""
+def norm_odds(v, fallback=1.90) -> float:
+    """Decimal odds: 1.90 means a winning 100 stake returns 190 (profit 90)."""
     try:
-        m = int(m)
+        v = float(v)
     except (TypeError, ValueError):
-        return 1
-    return m if m in ALLOWED_MULTIPLIERS else 1
+        return fallback
+    if v < MIN_ODDS or v > MAX_ODDS:
+        return fallback
+    return round(v, 3)
 
-def scored_points(match: dict, predicted_winner: str) -> float:
-    """Base scoring × the match's point multiplier (x1/x2/x4)."""
-    return calc_points(match, predicted_winner) * norm_multiplier(match.get("multiplier", 1))
+def ah_outcome(match_terms: dict, side: str, score_home: int, score_away: int) -> float:
+    """Settle one Asian-handicap bet.
 
-def default_pick(match: dict) -> str:
-    """System default team for a match — mirrors the frontend rule:
-    the handicap team when there's a line, otherwise the home (left) team."""
-    return match["handicap_team"] if (match.get("handicap_value") or 0) > 0 else match["team_home"]
+    Returns the standard AH result factor for the backed side:
+       1.0 = win      0.5 = half win    0.0 = push (stake back)
+      -0.5 = half loss  -1.0 = loss
 
-def ensure_default_predictions(conn, match: dict) -> int:
-    """Persist the system default pick for every non-admin user who hasn't
-    submitted a prediction for this match. This is the safety net that keeps
-    the displayed default in sync with real backend data (and scoring).
-    Knockout matches (anything past Group Stage) only get a default for users
-    flagged knockout_eligible, since the roster can shrink/grow between rounds.
-    Returns the number of default rows created."""
-    team = default_pick(match)
-    eligibility = "" if match.get("stage") == "Group Stage" else "AND knockout_eligible=1 "
-    missing = conn.execute(
-        f"SELECT id FROM users WHERE is_admin=0 {eligibility}"
-        "AND id NOT IN (SELECT user_id FROM predictions WHERE match_id=?)",
-        (match["id"],)).fetchall()
-    for u in missing:
-        conn.execute(
-            "INSERT OR IGNORE INTO predictions (user_id, match_id, predicted_winner) VALUES (?,?,?)",
-            (u["id"], match["id"], team))
-    return len(missing)
+    `match_terms` carries the FROZEN terms of the bet (team_home/team_away plus
+    hdcp_team/line), never the live match row.
+    """
+    ht = match_terms["hdcp_team"]
+    line = float(match_terms["line"])
+    # goal difference from the point of view of the team giving the handicap
+    if ht == match_terms["team_home"]:
+        raw = float(score_home - score_away)
+    else:
+        raw = float(score_away - score_home)
 
-def apply_result(conn, match: dict, score_home: int, score_away: int, final: bool) -> int:
-    """Set a match's score and recompute every prediction's points immediately.
-    final=True finalizes the match (status 'finished'); final=False marks it
-    'live' so the score can still be updated again (e.g. half-time then
-    full-time). Betting is always closed once a score is entered. Recomputes
-    from scratch each call, so it is safe to run repeatedly. Returns the number
-    of predictions scored."""
+    def one_line(raw_diff, ln):
+        d = round(raw_diff - ln, 4)
+        if ln % 1 == 0.0:                 # whole line: a push is possible
+            return 1.0 if d > 0 else (0.0 if d == 0 else -1.0)
+        return 1.0 if d > 0 else -1.0     # half line: no push
+
+    frac = round(line % 1, 2)
+    if frac in (0.25, 0.75):              # quarter line = split across two lines
+        res = (one_line(raw, line - 0.25) + one_line(raw, line + 0.25)) / 2
+    else:
+        res = one_line(raw, line)
+
+    # res is from the handicap team's perspective; flip it for the other side
+    return res if side == ht else -res
+
+def payout_for(stake: float, odds: float, outcome: float) -> float:
+    """Credits returned to the punter (0 = lost everything, stake = push)."""
+    profit = stake * (odds - 1.0)
+    if outcome == 1.0:   return stake + profit
+    if outcome == 0.5:   return stake + profit / 2
+    if outcome == 0.0:   return stake
+    if outcome == -0.5:  return stake / 2
+    return 0.0
+
+# ─── Credits ─────────────────────────────────────────────────
+def move_credits(conn, user_id: int, delta: float, reason: str,
+                 note: str = "", bet_id: int = None, admin_id: int = None) -> float:
+    """Apply a credit movement and append it to the ledger. Returns the new
+    balance. Callers are responsible for committing."""
+    row = conn.execute("SELECT credits FROM users WHERE id=?", (user_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้")
+    new_balance = round(float(row["credits"]) + float(delta), 2)
+    conn.execute("UPDATE users SET credits=? WHERE id=?", (new_balance, user_id))
+    conn.execute("""INSERT INTO credit_ledger (user_id, delta, balance_after, reason, note, bet_id, admin_id)
+                    VALUES (?,?,?,?,?,?,?)""",
+                 (user_id, round(float(delta), 2), new_balance, reason, note, bet_id, admin_id))
+    return new_balance
+
+# ─── Betting windows ─────────────────────────────────────────
+def day_status(conn, play_date: str) -> str:
+    row = conn.execute("SELECT status FROM bet_days WHERE play_date=?", (play_date,)).fetchone()
+    return row["status"] if row else "draft"
+
+def bet_gate(conn, match: dict):
+    """Why this match can't be bet on right now — or None when it's open.
+
+    Two gates must both pass: the admin has opened the match's DAY, and the
+    match itself is still more than BET_CUTOFF_MIN from kickoff. `force_open`
+    is the admin's override for both.
+    """
+    if match["status"] == "finished":
+        return "นัดนี้จบไปแล้ว"
+    if match.get("force_open"):
+        return None
+    if match.get("locked"):
+        return "แอดมินปิดรับพนันนัดนี้แล้ว"
+    if match["status"] != "upcoming":
+        return "นัดนี้เริ่มไปแล้ว"
+    if day_status(conn, match.get("play_date") or "") != "open":
+        return "ยังไม่เปิดรับพนันของวันนี้"
+    ko = _ko_bkk(match["kickoff_time"])
+    if ko is None:
+        return "เวลาเตะไม่ถูกต้อง"
+    if _now_bkk() >= ko - timedelta(minutes=BET_CUTOFF_MIN):
+        return f"ปิดรับแล้ว (ต้องแทงก่อนเตะ {BET_CUTOFF_MIN} นาที)"
+    return None
+
+def odds_frozen(conn, match: dict) -> bool:
+    """Odds stop moving at exactly the same moment betting closes."""
+    return bet_gate(conn, match) is not None
+
+# ─── Settlement ──────────────────────────────────────────────
+def settle_match(conn, match: dict, score_home: int, score_away: int, final: bool) -> dict:
+    """Write a score and settle (or re-settle) every bet on the match.
+
+    Re-entrant: an already-settled bet is first reversed in the ledger, then
+    re-paid at the corrected figure, so fixing a wrong score always converges.
+    """
     status = "finished" if final else "live"
     conn.execute("UPDATE matches SET score_home=?, score_away=?, status=?, locked=1 WHERE id=?",
                  (score_home, score_away, status, match["id"]))
-    ensure_default_predictions(conn, match)  # make sure everyone has a row before scoring
-    scored = {**match, "score_home": score_home, "score_away": score_away}
-    preds = conn.execute("SELECT * FROM predictions WHERE match_id=?", (match["id"],)).fetchall()
-    for p in preds:
-        conn.execute("UPDATE predictions SET points=? WHERE id=?",
-                     (scored_points(scored, p["predicted_winner"]), p["id"]))
-    return len(preds)
+
+    bets = [dict(b) for b in conn.execute(
+        "SELECT * FROM bets WHERE match_id=? AND status != 'void'", (match["id"],)).fetchall()]
+    if not final:
+        return {"settled": 0, "bets": len(bets)}   # only pay out once the game is over
+
+    settled = 0
+    for b in bets:
+        if b["status"] == "settled" and b["payout"] is not None:
+            move_credits(conn, b["user_id"], -float(b["payout"]), "refund",
+                         note=f"แก้ผลนัด #{match['id']} (คืนยอดเดิม)", bet_id=b["id"])
+        terms = {"team_home": match["team_home"], "team_away": match["team_away"],
+                 "hdcp_team": b["hdcp_team_taken"], "line": b["line_taken"]}
+        outcome = ah_outcome(terms, b["side"], score_home, score_away)
+        payout = round(payout_for(float(b["stake"]), float(b["odds_taken"]), outcome), 2)
+        conn.execute("""UPDATE bets SET status='settled', outcome=?, payout=?, settled_at=datetime('now')
+                        WHERE id=?""", (outcome, payout, b["id"]))
+        if payout:
+            move_credits(conn, b["user_id"], payout, "payout",
+                         note=f"ผลนัด #{match['id']}", bet_id=b["id"])
+        settled += 1
+    return {"settled": settled, "bets": len(bets)}
 
 # ─── Endpoints ───────────────────────────────────────────────
 @app.post("/token")
@@ -366,9 +491,19 @@ def login(form: OAuth2PasswordRequestForm = Depends()):
 
 @app.get("/me")
 def me(user=Depends(get_current_user)):
+    conn = get_db()
+    row = conn.execute("""
+        SELECT COALESCE(SUM(stake),0) AS staked,
+               COUNT(*) AS bets,
+               COUNT(CASE WHEN status='open' THEN 1 END) AS open_bets,
+               COALESCE(SUM(CASE WHEN status='settled' THEN payout - stake END),0) AS net
+        FROM bets WHERE user_id=? AND status != 'void'""", (user["id"],)).fetchone()
+    conn.close()
     return {"id": user["id"], "username": user["username"],
             "display_name": user["display_name"], "is_admin": user["is_admin"],
-            "knockout_eligible": bool(user["knockout_eligible"])}
+            "credits": round(float(user["credits"]), 2),
+            "staked": round(float(row["staked"]), 2), "bets": row["bets"],
+            "open_bets": row["open_bets"], "net": round(float(row["net"]), 2)}
 
 @app.post("/me/update")
 def update_me(body: ProfileIn, user=Depends(get_current_user)):
@@ -385,176 +520,29 @@ def update_me(body: ProfileIn, user=Depends(get_current_user)):
 def stages(user=Depends(get_current_user)):
     return STAGES
 
-def get_display_settings(conn) -> dict:
-    row = conn.execute("SELECT value FROM settings WHERE key='display'").fetchone()
-    if not row:
-        return dict(DEFAULT_DISPLAY_SETTINGS)
-    try:
-        cfg = json.loads(row["value"])
-    except (TypeError, ValueError):
-        return dict(DEFAULT_DISPLAY_SETTINGS)
-    # keep only known keys, in their configured order; fall back to defaults if empty
-    home_stats = [k for k in cfg.get("home_stats", []) if k in HOME_STAT_KEYS] or list(DEFAULT_DISPLAY_SETTINGS["home_stats"])
-    lb_tabs = [k for k in cfg.get("lb_tabs", []) if k in LB_TAB_KEYS] or list(DEFAULT_DISPLAY_SETTINGS["lb_tabs"])
-    return {"home_stats": home_stats, "lb_tabs": lb_tabs}
-
 @app.get("/settings")
 def settings(user=Depends(get_current_user)):
-    """Display config (home stat boxes / leaderboard tabs) — visible to everyone
-    so the UI knows what the admin chose to show. Also reports the current build
-    so a stale client can detect a new deploy and reload itself."""
+    return {"build": APP_BUILD, "cutoff_min": BET_CUTOFF_MIN}
+
+@app.get("/ledger/mine")
+def my_ledger(user=Depends(get_current_user)):
     conn = get_db()
-    cfg = get_display_settings(conn)
+    rows = conn.execute("""SELECT delta, balance_after, reason, note, created_at
+                           FROM credit_ledger WHERE user_id=?
+                           ORDER BY id DESC LIMIT 100""", (user["id"],)).fetchall()
     conn.close()
-    return {**cfg, "build": APP_BUILD}
+    return [dict(r) for r in rows]
 
-@app.put("/admin/settings")
-def update_settings(body: DisplaySettingsIn, user=Depends(require_admin)):
-    home_stats = [k for k in body.home_stats if k in HOME_STAT_KEYS]
-    lb_tabs = [k for k in body.lb_tabs if k in LB_TAB_KEYS]
-    if not lb_tabs:
-        raise HTTPException(status_code=400, detail="ต้องเปิดอย่างน้อย 1 แท็บตารางคะแนน")
-    cfg = {"home_stats": home_stats, "lb_tabs": lb_tabs}
-    conn = get_db()
-    conn.execute("INSERT INTO settings (key, value) VALUES ('display', ?) "
-                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(cfg),))
-    conn.commit()
-    conn.close()
-    return {"ok": True, **cfg}
-
-# ─── Champion prediction (ทายแชมป์) ─────────────────────────────────
-def _champ_cfg(conn) -> dict:
-    row = conn.execute("SELECT value FROM settings WHERE key='champion'").fetchone()
-    cfg = dict(DEFAULT_CHAMPION_CFG)
-    if row:
-        try:
-            cfg.update({k: v for k, v in json.loads(row["value"]).items() if k in cfg})
-        except (TypeError, ValueError):
-            pass
-    return cfg
-
-def _champ_locked(cfg: dict) -> bool:
-    """Picking closes at the deadline (Bangkok time) or once a champion is declared."""
-    if cfg.get("champion_team"):
-        return True
-    dl = _ko_bkk(cfg.get("deadline") or "")
-    if dl is None:
-        return False
-    return (datetime.utcnow() + timedelta(hours=7)) > dl
-
-def _champ_pool(conn, cfg=None) -> list:
-    """Pickable teams = the admin-managed shortlist in the champion config; flags
-    are resolved from the teams registry by name."""
-    cfg = cfg or _champ_cfg(conn)
-    names = cfg.get("teams") or []
-    if not names:
-        return []
-    flags = {r["name"]: r["flag"] for r in conn.execute("SELECT name, flag FROM teams").fetchall()}
-    seen, pool = set(), []
-    for n in names:
-        if n and n not in seen:
-            seen.add(n)
-            pool.append({"name": n, "flag": flags.get(n, "")})
-    return pool
-
-@app.get("/champion")
-def champion(user=Depends(get_current_user)):
-    conn = get_db()
-    cfg = _champ_cfg(conn)
-    locked = _champ_locked(cfg)
-    pool = _champ_pool(conn, cfg)
-    mine = conn.execute("SELECT team FROM champion_picks WHERE user_id=?", (user["id"],)).fetchone()
-    picks = None
-    if locked:  # picks stay hidden until betting closes, then everyone sees them
-        picks = [dict(r) for r in conn.execute("""
-            SELECT u.display_name, u.username, cp.team, cp.points
-            FROM champion_picks cp JOIN users u ON u.id=cp.user_id
-            WHERE u.is_admin=0 ORDER BY cp.team, u.display_name""").fetchall()]
-    total_picked = conn.execute(
-        "SELECT COUNT(*) AS n FROM champion_picks cp JOIN users u ON u.id=cp.user_id WHERE u.is_admin=0"
-    ).fetchone()["n"]
-    conn.close()
-    return {"deadline": cfg["deadline"], "points": cfg["points"], "champion_team": cfg["champion_team"],
-            "locked": locked, "teams": pool, "my_pick": mine["team"] if mine else None,
-            "picks": picks, "total_picked": total_picked,
-            "eligible": bool(user["is_admin"]) or bool(user["knockout_eligible"])}
-
-@app.post("/champion/pick")
-def champion_pick(body: ChampionPickIn, user=Depends(get_current_user)):
-    conn = get_db()
-    cfg = _champ_cfg(conn)
-    if _champ_locked(cfg):
-        conn.close()
-        raise HTTPException(status_code=400, detail="ปิดรับการทายแชมป์แล้ว")
-    if not user["is_admin"] and not user["knockout_eligible"]:
-        conn.close()
-        raise HTTPException(status_code=403, detail="คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้")
-    pool = {t["name"] for t in _champ_pool(conn, cfg)}
-    if not pool:
-        conn.close()
-        raise HTTPException(status_code=400, detail="ยังไม่มีรายชื่อทีมให้ทาย (รอแอดมินเพิ่มทีม)")
-    if body.team not in pool:
-        conn.close()
-        raise HTTPException(status_code=400, detail="เลือกได้เฉพาะทีมในรายการที่แอดมินกำหนด")
-    conn.execute("""INSERT INTO champion_picks (user_id, team, picked_at)
-                    VALUES (?,?,datetime('now'))
-                    ON CONFLICT(user_id) DO UPDATE SET team=excluded.team, picked_at=excluded.picked_at""",
-                 (user["id"], body.team))
-    conn.commit()
-    conn.close()
-    return {"ok": True, "team": body.team}
-
-@app.put("/admin/champion")
-def champion_admin(body: ChampionCfgIn, user=Depends(require_admin)):
-    conn = get_db()
-    cfg = _champ_cfg(conn)
-    if body.deadline is not None:
-        cfg["deadline"] = body.deadline
-    if body.points is not None:
-        cfg["points"] = body.points
-    if body.champion_team is not None:
-        cfg["champion_team"] = body.champion_team or None
-    if body.teams is not None:
-        seen, clean = set(), []
-        for n in body.teams:
-            n = (n or "").strip()
-            if n and n not in seen:
-                seen.add(n)
-                clean.append(n)
-        cfg["teams"] = clean
-    conn.execute("INSERT INTO settings (key, value) VALUES ('champion', ?) "
-                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(cfg),))
-    # if the pickable list changed while betting is still open, drop picks whose
-    # team was removed (e.g. lost in the Round of 16) so those users re-pick
-    removed = 0
-    if body.teams is not None and not cfg["champion_team"]:
-        pool = cfg["teams"]
-        if pool:
-            ph = ",".join("?" * len(pool))
-            cur = conn.execute(f"DELETE FROM champion_picks WHERE team NOT IN ({ph})", pool)
-        else:
-            cur = conn.execute("DELETE FROM champion_picks")
-        removed = cur.rowcount
-    # (re)award the bonus: correct picks get cfg points, everyone else 0;
-    # clearing the champion resets points to NULL (undecided)
-    awarded = 0
-    if cfg["champion_team"]:
-        conn.execute("UPDATE champion_picks SET points = CASE WHEN team=? THEN ? ELSE 0 END",
-                     (cfg["champion_team"], cfg["points"]))
-        awarded = conn.execute("SELECT COUNT(*) AS n FROM champion_picks WHERE points > 0").fetchone()["n"]
-    else:
-        conn.execute("UPDATE champion_picks SET points = NULL")
-    conn.commit()
-    conn.close()
-    return {"ok": True, **cfg, "awarded": awarded, "removed": removed}
-
-# ─── Admin: user management (self-registration disabled) ─────
+# ─── Admin: user management ──────────────────────────────────
 @app.get("/admin/users")
 def list_users(user=Depends(require_admin)):
     conn = get_db()
-    rows = conn.execute(
-        "SELECT id, username, display_name, is_admin, knockout_eligible FROM users ORDER BY is_admin DESC, id"
-    ).fetchall()
+    rows = conn.execute("""
+        SELECT u.id, u.username, u.display_name, u.is_admin, u.credits,
+               COALESCE(SUM(CASE WHEN b.status != 'void' THEN b.stake END),0) AS staked,
+               COUNT(CASE WHEN b.status='open' THEN 1 END) AS open_bets
+        FROM users u LEFT JOIN bets b ON b.user_id=u.id
+        GROUP BY u.id ORDER BY u.is_admin DESC, u.id""").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -562,10 +550,12 @@ def list_users(user=Depends(require_admin)):
 def create_user(body: UserIn, user=Depends(require_admin)):
     conn = get_db()
     try:
-        conn.execute(
-            "INSERT INTO users (username, display_name, password_hash, knockout_eligible) VALUES (?,?,?,?)",
-            (body.username.strip(), body.display_name.strip(), hash_password(body.password),
-             1 if body.knockout_eligible else 0))
+        cur = conn.execute(
+            "INSERT INTO users (username, display_name, password_hash) VALUES (?,?,?)",
+            (body.username.strip(), body.display_name.strip(), hash_password(body.password)))
+        if body.credits:
+            move_credits(conn, cur.lastrowid, float(body.credits), "topup",
+                         note="เครดิตเริ่มต้น", admin_id=user["id"])
         conn.commit()
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="ชื่อผู้ใช้นี้มีอยู่แล้ว")
@@ -580,7 +570,8 @@ def delete_user(user_id: int, user=Depends(require_admin)):
     if target and target["is_admin"]:
         conn.close()
         raise HTTPException(status_code=400, detail="ลบผู้ดูแลระบบไม่ได้")
-    conn.execute("DELETE FROM predictions WHERE user_id=?", (user_id,))
+    conn.execute("DELETE FROM bets WHERE user_id=?", (user_id,))
+    conn.execute("DELETE FROM credit_ledger WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM users WHERE id=?", (user_id,))
     conn.commit()
     conn.close()
@@ -593,14 +584,40 @@ def edit_user(user_id: int, body: UserEditIn, user=Depends(require_admin)):
         conn.execute("UPDATE users SET display_name=? WHERE id=?", (body.display_name.strip(), user_id))
     if body.password:
         conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(body.password), user_id))
-    if body.knockout_eligible is not None:
-        conn.execute("UPDATE users SET knockout_eligible=? WHERE id=?",
-                     (1 if body.knockout_eligible else 0, user_id))
     conn.commit()
     conn.close()
     return {"ok": True}
 
-# ─── Teams registry (pre-defined flags) ─────────────────────
+@app.post("/admin/credits")
+def add_credits(body: CreditIn, user=Depends(require_admin)):
+    """The only way credits enter the system — an admin hands them out."""
+    if not body.amount:
+        raise HTTPException(status_code=400, detail="จำนวนเครดิตต้องไม่เป็นศูนย์")
+    conn = get_db()
+    target = conn.execute("SELECT id, display_name, credits FROM users WHERE id=?", (body.user_id,)).fetchone()
+    if not target:
+        conn.close()
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้")
+    if body.amount < 0 and float(target["credits"]) + body.amount < 0:
+        conn.close()
+        raise HTTPException(status_code=400, detail="ดึงเครดิตคืนเกินยอดคงเหลือไม่ได้")
+    reason = "topup" if body.amount > 0 else "adjust"
+    balance = move_credits(conn, body.user_id, float(body.amount), reason,
+                           note=body.note or "", admin_id=user["id"])
+    conn.commit()
+    conn.close()
+    return {"ok": True, "credits": balance}
+
+@app.get("/admin/ledger")
+def admin_ledger(limit: int = 200, user=Depends(require_admin)):
+    conn = get_db()
+    rows = conn.execute("""SELECT l.*, u.display_name, u.username
+                           FROM credit_ledger l JOIN users u ON u.id=l.user_id
+                           ORDER BY l.id DESC LIMIT ?""", (max(1, min(limit, 1000)),)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+# ─── Teams registry ─────────────────────────────────────────
 @app.get("/teams")
 def list_teams(user=Depends(get_current_user)):
     conn = get_db()
@@ -625,184 +642,319 @@ def delete_team(team_id: int, user=Depends(require_admin)):
     conn.close()
     return {"ok": True}
 
+# ─── Betting days ───────────────────────────────────────────
+@app.get("/bet_days")
+def bet_days(user=Depends(get_current_user)):
+    """Every matchday with its open/closed state and a fixture count."""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT m.play_date,
+               COUNT(*) AS matches,
+               COUNT(CASE WHEN m.status='finished' THEN 1 END) AS finished,
+               MIN(m.kickoff_time) AS first_kickoff,
+               COALESCE(d.status,'draft') AS status
+        FROM matches m LEFT JOIN bet_days d ON d.play_date=m.play_date
+        WHERE m.play_date IS NOT NULL
+        GROUP BY m.play_date ORDER BY m.play_date""").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.put("/admin/bet_days")
+def set_bet_day(body: DayIn, user=Depends(require_admin)):
+    if body.status not in ("draft", "open", "closed"):
+        raise HTTPException(status_code=400, detail="สถานะไม่ถูกต้อง")
+    conn = get_db()
+    exists = conn.execute("SELECT 1 FROM matches WHERE play_date=? LIMIT 1", (body.play_date,)).fetchone()
+    if not exists:
+        conn.close()
+        raise HTTPException(status_code=404, detail="ไม่มีนัดในวันนี้")
+    stamp = "opened_at" if body.status == "open" else "closed_at"
+    conn.execute(f"""INSERT INTO bet_days (play_date, status, {stamp}, opened_by)
+                     VALUES (?,?,datetime('now'),?)
+                     ON CONFLICT(play_date) DO UPDATE
+                     SET status=excluded.status, {stamp}=datetime('now'), opened_by=excluded.opened_by""",
+                 (body.play_date, body.status, user["id"]))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "play_date": body.play_date, "status": body.status}
+
 # ─── Matches ────────────────────────────────────────────────
+def _decorate(conn, rows) -> list:
+    """Attach the live betting gate + pooled stake to each match."""
+    out = []
+    pools = {r["match_id"]: r for r in conn.execute("""
+        SELECT match_id, COUNT(*) AS n, COALESCE(SUM(stake),0) AS total
+        FROM bets WHERE status != 'void' GROUP BY match_id""").fetchall()}
+    for r in rows:
+        m = dict(r)
+        reason = bet_gate(conn, m)
+        pool = pools.get(m["id"])
+        m["can_bet"] = reason is None
+        m["closed_reason"] = reason
+        m["day_status"] = day_status(conn, m.get("play_date") or "")
+        m["pool_bets"] = pool["n"] if pool else 0
+        m["pool_total"] = round(float(pool["total"]), 2) if pool else 0.0
+        out.append(m)
+    return out
+
 @app.get("/matches")
 def list_matches(user=Depends(get_current_user)):
     conn = get_db()
     rows = conn.execute("SELECT * FROM matches ORDER BY kickoff_time").fetchall()
+    out = _decorate(conn, rows)
     conn.close()
-    return [dict(r) for r in rows]
+    return out
 
 @app.post("/matches")
 def add_match(body: MatchIn, user=Depends(require_admin)):
     conn = get_db()
-    # auto-fill flags from the team registry when not provided
     def reg_flag(name, given):
         if given: return given
         row = conn.execute("SELECT flag FROM teams WHERE name=?", (name,)).fetchone()
         return row["flag"] if row else ""
     hf = reg_flag(body.team_home, body.team_home_flag)
     af = reg_flag(body.team_away, body.team_away_flag)
-    conn.execute("""INSERT INTO matches
-        (team_home,team_away,team_home_flag,team_away_flag,stage,handicap_team,handicap_value,kickoff_time,multiplier)
-        VALUES (?,?,?,?,?,?,?,?,?)""",
-        (body.team_home, body.team_away, hf, af, body.stage, body.handicap_team, body.handicap_value,
-         body.kickoff_time, norm_multiplier(body.multiplier)))
+    oh, oa = norm_odds(body.odds_home), norm_odds(body.odds_away)
+    cur = conn.execute("""INSERT INTO matches
+        (team_home,team_away,team_home_flag,team_away_flag,stage,handicap_team,handicap_value,
+         odds_home,odds_away,kickoff_time,play_date)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (body.team_home, body.team_away, hf, af, body.stage, body.handicap_team,
+         body.handicap_value, oh, oa, body.kickoff_time, _play_date_of(body.kickoff_time)))
+    conn.execute("""INSERT INTO odds_history (match_id, handicap_team, handicap_value, odds_home, odds_away, source)
+                    VALUES (?,?,?,?,?,'admin')""",
+                 (cur.lastrowid, body.handicap_team, body.handicap_value, oh, oa))
     conn.commit()
     conn.close()
-    return {"ok": True}
+    return {"ok": True, "id": cur.lastrowid}
 
 @app.delete("/matches/{match_id}")
 def delete_match(match_id: int, user=Depends(require_admin)):
+    """Deleting a fixture refunds every open stake on it."""
     conn = get_db()
+    open_bets = conn.execute("SELECT * FROM bets WHERE match_id=? AND status='open'", (match_id,)).fetchall()
+    for b in open_bets:
+        move_credits(conn, b["user_id"], float(b["stake"]), "refund",
+                     note=f"ยกเลิกนัด #{match_id}", bet_id=b["id"])
+    conn.execute("UPDATE bets SET status='void' WHERE match_id=?", (match_id,))
     conn.execute("DELETE FROM matches WHERE id=?", (match_id,))
-    conn.execute("DELETE FROM predictions WHERE match_id=?", (match_id,))
     conn.commit()
     conn.close()
-    return {"ok": True}
+    return {"ok": True, "refunded": len(open_bets)}
 
 @app.put("/matches/{match_id}")
 def edit_match(match_id: int, body: MatchEditIn, user=Depends(require_admin)):
-    """Edit a match after creation — primarily the handicap line. If the match
-    already has a score, points are recomputed so the standings stay correct."""
     conn = get_db()
     match = conn.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
     if not match:
         conn.close()
         raise HTTPException(status_code=404, detail="ไม่พบนัด")
-    match = dict(match)
-    fields = {c: getattr(body, c) for c in ("handicap_team", "handicap_value", "kickoff_time", "stage", "multiplier")
+    fields = {c: getattr(body, c) for c in ("handicap_team", "handicap_value", "kickoff_time", "stage")
               if getattr(body, c) is not None}
-    if "multiplier" in fields:
-        fields["multiplier"] = norm_multiplier(fields["multiplier"])
+    if "kickoff_time" in fields:
+        fields["play_date"] = _play_date_of(fields["kickoff_time"])
     if fields:
         sets = ", ".join(f"{c}=?" for c in fields)
         conn.execute(f"UPDATE matches SET {sets} WHERE id=?", (*fields.values(), match_id))
-    # recompute points when the handicap changed on an already-scored match
-    recomputed = 0
-    new_match = {**match, **fields}
-    if new_match["score_home"] is not None and new_match["score_away"] is not None:
-        preds = conn.execute("SELECT * FROM predictions WHERE match_id=?", (match_id,)).fetchall()
-        for p in preds:
-            conn.execute("UPDATE predictions SET points=? WHERE id=?",
-                         (scored_points(new_match, p["predicted_winner"]), p["id"]))
-        recomputed = len(preds)
     conn.commit()
     conn.close()
-    return {"ok": True, "recomputed": recomputed}
+    # NOTE: already-placed bets keep their own line_taken — editing the fixture
+    # never rewrites them. Re-enter the score to re-settle if the result changes.
+    return {"ok": True}
 
-# ─── Predictions ────────────────────────────────────────────
-@app.get("/predictions/mine")
-def my_predictions(user=Depends(get_current_user)):
+@app.put("/matches/{match_id}/odds")
+def update_odds(match_id: int, body: OddsIn, user=Depends(require_admin)):
+    """Move the price. Allowed right up to the betting cutoff, never after."""
     conn = get_db()
-    rows = conn.execute("""
-        SELECT p.*, m.team_home, m.team_away, m.team_home_flag, m.team_away_flag, m.stage,
-               m.handicap_team, m.handicap_value, m.kickoff_time, m.score_home, m.score_away,
-               m.status, m.locked, m.force_open, m.multiplier
-        FROM predictions p JOIN matches m ON p.match_id=m.id
-        WHERE p.user_id=? ORDER BY m.kickoff_time
-    """, (user["id"],)).fetchall()
+    row = conn.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="ไม่พบนัด")
+    m = dict(row)
+    if odds_frozen(conn, m):
+        conn.close()
+        raise HTTPException(status_code=400, detail="ปิดรับพนันแล้ว — แก้ราคาไม่ได้")
+    ht = body.handicap_team or m["handicap_team"]
+    hv = m["handicap_value"] if body.handicap_value is None else float(body.handicap_value)
+    oh = norm_odds(body.odds_home, m["odds_home"]) if body.odds_home is not None else m["odds_home"]
+    oa = norm_odds(body.odds_away, m["odds_away"]) if body.odds_away is not None else m["odds_away"]
+    conn.execute("UPDATE matches SET handicap_team=?, handicap_value=?, odds_home=?, odds_away=? WHERE id=?",
+                 (ht, hv, oh, oa, match_id))
+    conn.execute("""INSERT INTO odds_history (match_id, handicap_team, handicap_value, odds_home, odds_away, source)
+                    VALUES (?,?,?,?,?,'admin')""", (match_id, ht, hv, oh, oa))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "handicap_team": ht, "handicap_value": hv, "odds_home": oh, "odds_away": oa}
+
+@app.get("/matches/{match_id}/odds_history")
+def odds_history(match_id: int, user=Depends(get_current_user)):
+    conn = get_db()
+    rows = conn.execute("""SELECT handicap_team, handicap_value, odds_home, odds_away, source, created_at
+                           FROM odds_history WHERE match_id=? ORDER BY id DESC LIMIT 50""",
+                        (match_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
-@app.post("/predictions")
-def submit_prediction(body: PredictionIn, user=Depends(get_current_user)):
+# ─── Bets ───────────────────────────────────────────────────
+@app.get("/bets/mine")
+def my_bets(user=Depends(get_current_user)):
     conn = get_db()
-    match = conn.execute("SELECT * FROM matches WHERE id=?", (body.match_id,)).fetchone()
-    if not match:
+    rows = conn.execute("""
+        SELECT b.*, m.team_home, m.team_away, m.team_home_flag, m.team_away_flag, m.stage,
+               m.kickoff_time, m.play_date, m.score_home, m.score_away, m.status AS match_status
+        FROM bets b JOIN matches m ON b.match_id=m.id
+        WHERE b.user_id=? ORDER BY m.kickoff_time DESC, b.id DESC""", (user["id"],)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+@app.post("/bets")
+def place_bet(body: BetIn, user=Depends(get_current_user)):
+    """Place a stake. The line and price are frozen onto the bet right here —
+    this is the only moment they are read from the match."""
+    stake = round(float(body.stake), 2)
+    if stake <= 0:
+        raise HTTPException(status_code=400, detail="จำนวนเงินต้องมากกว่า 0")
+    conn = get_db()
+    row = conn.execute("SELECT * FROM matches WHERE id=?", (body.match_id,)).fetchone()
+    if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="ไม่พบนัดนี้")
-    match = dict(match)
-    if match.get("stage") != "Group Stage" and not user["knockout_eligible"]:
+    m = dict(row)
+    if body.side not in (m["team_home"], m["team_away"]):
         conn.close()
-        raise HTTPException(status_code=403, detail="คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้")
-    # A result has been entered → betting is permanently closed, no override.
-    if match["status"] == "finished":
+        raise HTTPException(status_code=400, detail="เลือกได้เฉพาะทีมในนัดนี้")
+    reason = bet_gate(conn, m)
+    if reason:
         conn.close()
-        raise HTTPException(status_code=400, detail="นัดนี้จบไปแล้ว")
-    # force_open is the admin's authoritative override: when set it re-opens
-    # betting past the 30-min cutoff and even while the match is LIVE. Only the
-    # automatic gates below apply when it is NOT set.
-    if not match.get("force_open"):
-        if match.get("locked"):
-            conn.close()
-            raise HTTPException(status_code=400, detail="แอดมินปิดรับการทายนัดนี้แล้ว")
-        if match["status"] != "upcoming":
-            conn.close()
-            raise HTTPException(status_code=400, detail="นัดนี้เริ่มไปแล้ว")
-        kickoff = datetime.fromisoformat(match["kickoff_time"])
-        if datetime.utcnow() + timedelta(hours=7) >= kickoff - timedelta(minutes=30):
-            conn.close()
-            raise HTTPException(status_code=400, detail="หมดเวลาทาย (ต้องส่งก่อน Kickoff 30 นาที)")
-    try:
-        conn.execute("INSERT OR REPLACE INTO predictions (user_id, match_id, predicted_winner) VALUES (?,?,?)",
-                     (user["id"], body.match_id, body.predicted_winner))
-        conn.commit()
-    finally:
-        conn.close()
-    return {"ok": True}
+        raise HTTPException(status_code=400, detail=reason)
 
-# ─── Admin: results, lock, query ────────────────────────────
+    fresh = conn.execute("SELECT credits FROM users WHERE id=?", (user["id"],)).fetchone()
+    if float(fresh["credits"]) < stake:
+        conn.close()
+        raise HTTPException(status_code=400,
+                            detail=f"เครดิตไม่พอ (คงเหลือ {round(float(fresh['credits']),2)})")
+
+    odds = m["odds_home"] if body.side == m["team_home"] else m["odds_away"]
+    cur = conn.execute("""INSERT INTO bets
+        (user_id, match_id, side, stake, hdcp_team_taken, line_taken, odds_taken)
+        VALUES (?,?,?,?,?,?,?)""",
+        (user["id"], body.match_id, body.side, stake,
+         m["handicap_team"], m["handicap_value"], odds))
+    bet_id = cur.lastrowid
+    balance = move_credits(conn, user["id"], -stake, "bet",
+                           note=f"{m['team_home']} v {m['team_away']} · {body.side}", bet_id=bet_id)
+    conn.commit()
+    conn.close()
+    return {"ok": True, "bet_id": bet_id, "credits": balance,
+            "line_taken": m["handicap_value"], "odds_taken": odds}
+
+@app.delete("/bets/{bet_id}")
+def cancel_bet(bet_id: int, user=Depends(get_current_user)):
+    """Pull a stake back while the match is still open for betting."""
+    conn = get_db()
+    b = conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()
+    if not b or (b["user_id"] != user["id"] and not user["is_admin"]):
+        conn.close()
+        raise HTTPException(status_code=404, detail="ไม่พบบิลนี้")
+    if b["status"] != "open":
+        conn.close()
+        raise HTTPException(status_code=400, detail="บิลนี้ปิดไปแล้ว")
+    m = conn.execute("SELECT * FROM matches WHERE id=?", (b["match_id"],)).fetchone()
+    if m and bet_gate(conn, dict(m)):
+        conn.close()
+        raise HTTPException(status_code=400, detail="ปิดรับพนันแล้ว — ยกเลิกไม่ได้")
+    conn.execute("UPDATE bets SET status='void', settled_at=datetime('now') WHERE id=?", (bet_id,))
+    balance = move_credits(conn, b["user_id"], float(b["stake"]), "refund",
+                           note="ยกเลิกบิล", bet_id=bet_id)
+    conn.commit()
+    conn.close()
+    return {"ok": True, "credits": balance}
+
+@app.get("/matches/{match_id}/bets")
+def match_bets(match_id: int, user=Depends(get_current_user)):
+    """Who backed what — only revealed once betting on the match has closed."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="ไม่พบนัด")
+    if bet_gate(conn, dict(row)) is None and not user["is_admin"]:
+        conn.close()
+        return {"revealed": False, "bets": []}
+    rows = conn.execute("""SELECT u.display_name, b.side, b.stake, b.line_taken, b.odds_taken,
+                                  b.status, b.outcome, b.payout
+                           FROM bets b JOIN users u ON u.id=b.user_id
+                           WHERE b.match_id=? AND b.status != 'void'
+                           ORDER BY b.stake DESC""", (match_id,)).fetchall()
+    conn.close()
+    return {"revealed": True, "bets": [dict(r) for r in rows]}
+
+# ─── Admin: results ─────────────────────────────────────────
 @app.post("/admin/result")
 def set_result(body: ResultIn, user=Depends(require_admin)):
     conn = get_db()
     match = conn.execute("SELECT * FROM matches WHERE id=?", (body.match_id,)).fetchone()
-    if not match: raise HTTPException(status_code=404, detail="ไม่พบนัด")
-    n = apply_result(conn, dict(match), body.score_home, body.score_away, final=True)
+    if not match:
+        conn.close()
+        raise HTTPException(status_code=404, detail="ไม่พบนัด")
+    info = settle_match(conn, dict(match), body.score_home, body.score_away, final=True)
     conn.commit()
     conn.close()
-    return {"ok": True, "updated": n}
+    return {"ok": True, **info}
 
 @app.post("/admin/results_batch")
 def set_results_batch(body: BatchResultIn, user=Depends(require_admin)):
-    """Update the score of several in-progress matches in a single request and
-    recompute points immediately. Built for live updates (half-time / full-time)
-    while keeping API calls to a minimum. Pass final=True per match when it ends."""
     conn = get_db()
     detail = []
     for item in body.results:
         match = conn.execute("SELECT * FROM matches WHERE id=?", (item.match_id,)).fetchone()
         if not match:
             continue
-        n = apply_result(conn, dict(match), item.score_home, item.score_away, item.final)
-        detail.append({"match_id": item.match_id, "scored": n, "final": item.final})
+        info = settle_match(conn, dict(match), item.score_home, item.score_away, item.final)
+        detail.append({"match_id": item.match_id, "final": item.final, **info})
     conn.commit()
     conn.close()
     return {"ok": True, "matches": len(detail), "detail": detail}
 
-# ─── Live scores: World Cup 2026 (free provider, default = ESPN) ─────────────
-# The admin maps each of our matches to a specific provider event id (no name
-# guessing). A background poller then auto-fetches the score every POLL_INTERVAL
-# while a match is in play, and finalizes it when the provider says the game is
-# over. Default provider is ESPN's public scoreboard — free, no API key, and it
-# carries the FIFA World Cup. Set SCORE_PROVIDER=apifootball to use API-Football
-# instead (needs a paid plan for season 2026 + APIFOOTBALL_KEY).
+@app.post("/admin/lock")
+def lock_match(body: LockIn, user=Depends(require_admin)):
+    conn = get_db()
+    if body.locked:
+        conn.execute("UPDATE matches SET locked=1, force_open=0 WHERE id=?", (body.match_id,))
+    else:
+        conn.execute("UPDATE matches SET locked=0, force_open=1 WHERE id=?", (body.match_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+# ─── Live scores (free provider, default = ESPN) ─────────────
+# The admin maps each of our matches to a provider event id (no name guessing).
+# A background poller then auto-fetches the score while a match is in play and
+# finalizes it when the provider says the game is over.
 SCORE_PROVIDER = os.environ.get("SCORE_PROVIDER", "espn").lower()
 
-# ESPN (default, no key) — public site API. fifa.world = the World Cup finals.
+# ESPN (default, no key) — aff.championship is the ASEAN Championship.
 ESPN_BASE   = os.environ.get("ESPN_BASE", "https://site.api.espn.com/apis/site/v2/sports/soccer")
-ESPN_LEAGUE = os.environ.get("ESPN_LEAGUE", "fifa.world")
+ESPN_LEAGUE = os.environ.get("ESPN_LEAGUE", "aff.championship")
 
-# API-Football (optional alternative) — needs a paid plan for the 2026 season.
+# API-Football (optional alternative) — needs a paid plan for the current season.
 APIFOOTBALL_KEY    = os.environ.get("APIFOOTBALL_KEY", "")
 APIFOOTBALL_BASE   = os.environ.get("APIFOOTBALL_BASE", "https://v3.football.api-sports.io")
-APIFOOTBALL_LEAGUE = os.environ.get("APIFOOTBALL_LEAGUE", "1")      # 1 = FIFA World Cup
-APIFOOTBALL_SEASON = os.environ.get("APIFOOTBALL_SEASON", "2026")   # World Cup 2026 only
+APIFOOTBALL_LEAGUE = os.environ.get("APIFOOTBALL_LEAGUE", "27")
+APIFOOTBALL_SEASON = os.environ.get("APIFOOTBALL_SEASON", "2026")
 
-POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "900"))  # 15 min
-POLL_WINDOW_MIN   = int(os.environ.get("POLL_WINDOW_MIN", "150"))    # poll for 150 min after kickoff
+POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "900"))
+POLL_WINDOW_MIN   = int(os.environ.get("POLL_WINDOW_MIN", "150"))
 
-_LIVE_STATUS  = {"1H", "HT", "2H", "ET", "BT", "P", "SUSP", "INT", "LIVE"}   # API-Football
-_FINAL_STATUS = {"FT", "AET", "PEN"}                                          # API-Football
-# Used only to keep home/away orientation correct once the admin has chosen the
-# event — NOT to pick which event goes with which match (that is manual).
+_LIVE_STATUS  = {"1H", "HT", "2H", "ET", "BT", "P", "SUSP", "INT", "LIVE"}
+_FINAL_STATUS = {"FT", "AET", "PEN"}
+
 _TEAM_ALIAS_GROUPS = [
-    {"southkorea", "korearepublic"},
-    {"usa", "unitedstates", "unitedstatesofamerica", "usmnt"},
-    {"uae", "unitedarabemirates"},
-    {"czechrepublic", "czechia"},
-    {"turkey", "turkiye", "trkiye"},
-    {"ivorycoast", "cotedivoire"},
+    {"timorleste", "easttimor"},
+    {"myanmar", "burma"},
+    {"laos", "laopdr"},
+    {"brunei", "bruneidarussalam"},
+    {"vietnam", "vietnamnational"},
 ]
 
 def _norm_team(s: str) -> str:
@@ -814,14 +966,11 @@ def _team_eq(a: str, b: str) -> bool:
         return True
     return any(na in g and nb in g for g in _TEAM_ALIAS_GROUPS)
 
-# A normalized fixture dict has: id, date, home, away, score_home, score_away,
-# live (bool), final (bool). Both providers parse into this shape.
-
 def _espn_get(date_yyyymmdd=None) -> dict:
     url = f"{ESPN_BASE}/{ESPN_LEAGUE}/scoreboard"
     if date_yyyymmdd:
         url += "?dates=" + date_yyyymmdd
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (worldcup-app)"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (eventforfriend)"})
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -834,7 +983,7 @@ def _espn_parse(payload: dict) -> list:
             home = next(c for c in cs if c.get("homeAway") == "home")
             away = next(c for c in cs if c.get("homeAway") == "away")
             stype = (e.get("status") or {}).get("type") or {}
-            state = (stype.get("state") or "").lower()        # pre | in | post
+            state = (stype.get("state") or "").lower()
             def _sc(c):
                 v = str(c.get("score", "")).strip()
                 return int(v) if v.lstrip("-").isdigit() else None
@@ -856,7 +1005,7 @@ def _espn_parse(payload: dict) -> list:
 def _apifootball_get(params: dict) -> dict:
     qs = urllib.parse.urlencode(params)
     headers = {"x-apisports-key": APIFOOTBALL_KEY}
-    if "rapidapi" in APIFOOTBALL_BASE:   # also support the RapidAPI proxy
+    if "rapidapi" in APIFOOTBALL_BASE:
         headers = {"x-rapidapi-key": APIFOOTBALL_KEY,
                    "x-rapidapi-host": APIFOOTBALL_BASE.split("//")[-1].split("/")[0]}
     req = urllib.request.Request(f"{APIFOOTBALL_BASE}/fixtures?{qs}", headers=headers)
@@ -885,10 +1034,9 @@ def _apifootball_parse(payload: dict) -> list:
 def _provider_ready() -> bool:
     if SCORE_PROVIDER == "apifootball":
         return bool(APIFOOTBALL_KEY)
-    return True   # ESPN needs no key
+    return True
 
 def _fixtures_for_dates(dates) -> list:
-    """Fetch normalized fixtures for a set of UTC dates (YYYYMMDD), deduped by id."""
     out, seen = [], set()
     for d in sorted({x for x in dates if x}):
         if SCORE_PROVIDER == "apifootball":
@@ -903,45 +1051,27 @@ def _fixtures_for_dates(dates) -> list:
     return out
 
 def _oriented_scores(m: dict, fx: dict):
-    """Return (home, away) goals aligned to OUR match's team order. The admin
-    chose the event; here we only flip orientation if the provider lists the
-    teams the other way round. Unknown goals count as 0."""
     sh = 0 if fx["score_home"] is None else fx["score_home"]
     sa = 0 if fx["score_away"] is None else fx["score_away"]
     if _team_eq(m["team_away"], fx["home"]) and _team_eq(m["team_home"], fx["away"]):
         return sa, sh
     return sh, sa
 
-def _ko_bkk(s: str):
-    """Parse a stored kickoff_time as Bangkok-local naive datetime."""
-    s = (s or "").replace(" ", "T")
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            continue
-    return None
-
 def _match_utc_date(m: dict):
-    """UTC calendar date (YYYYMMDD) of a match's kickoff — what providers key on."""
     ko = _ko_bkk(m["kickoff_time"])
     if ko is None:
         return None
     return (ko - timedelta(hours=7)).strftime("%Y%m%d")
 
 def _in_poll_window(m: dict) -> bool:
-    """True from kickoff until POLL_WINDOW_MIN minutes after (Bangkok time)."""
     ko = _ko_bkk(m["kickoff_time"])
     if ko is None:
         return False
-    now = datetime.utcnow() + timedelta(hours=7)
+    now = _now_bkk()
     return ko <= now <= ko + timedelta(minutes=POLL_WINDOW_MIN)
 
 @app.get("/admin/apifootball/fixtures")
 def apifootball_fixtures(user=Depends(require_admin)):
-    """List World Cup fixtures from the score provider (exact team names + event
-    ids) so the admin can manually map each of our matches to one. Looks up the
-    dates of our unfinished matches, plus today."""
     if not _provider_ready():
         raise HTTPException(status_code=400, detail="provider=apifootball แต่ยังไม่ได้ตั้ง APIFOOTBALL_KEY")
     conn = get_db()
@@ -963,7 +1093,6 @@ def apifootball_fixtures(user=Depends(require_admin)):
 
 @app.post("/admin/apifootball/map")
 def apifootball_map(body: MapIn, user=Depends(require_admin)):
-    """Bind (or clear) the provider event id for one of our matches."""
     conn = get_db()
     cur = conn.execute("UPDATE matches SET apifootball_fixture_id=? WHERE id=?",
                        (body.fixture_id, body.match_id))
@@ -975,8 +1104,6 @@ def apifootball_map(body: MapIn, user=Depends(require_admin)):
 
 @app.get("/admin/fetch_scores")
 def fetch_scores(user=Depends(require_admin)):
-    """Manual 'fetch now' — pull scores for every mapped, unfinished match and
-    return suggestions for the admin to review. Does NOT write anything."""
     if not _provider_ready():
         raise HTTPException(status_code=400, detail="provider=apifootball แต่ยังไม่ได้ตั้ง APIFOOTBALL_KEY")
     conn = get_db()
@@ -985,8 +1112,7 @@ def fetch_scores(user=Depends(require_admin)):
     ).fetchall()]
     conn.close()
     if not rows:
-        return {"ok": True, "fetched": 0, "matched": [],
-                "note": "ยังไม่มีนัดที่ผูกกับ event — กดผูกก่อน"}
+        return {"ok": True, "fetched": 0, "matched": [], "note": "ยังไม่มีนัดที่ผูกกับ event — กดผูกก่อน"}
     dates = {_match_utc_date(m) for m in rows} or {datetime.utcnow().strftime("%Y%m%d")}
     try:
         found = {fx["id"]: fx for fx in _fixtures_for_dates(dates)}
@@ -1001,11 +1127,8 @@ def fetch_scores(user=Depends(require_admin)):
         matched.append({"match_id": m["id"], "score_home": sh, "score_away": sa, "final": fx["final"]})
     return {"ok": True, "fetched": len(found), "matched": matched}
 
-# ─── Background poller: auto-fetch + auto-finalize while matches are live ────
+# ─── Background poller ──────────────────────────────────────
 def _poll_once() -> int:
-    """One auto cycle: for every mapped, unfinished match inside its poll
-    window, pull the live score and write it (finalizing when the game is over).
-    Returns the number of matches updated."""
     if not _provider_ready():
         return 0
     conn = get_db()
@@ -1023,7 +1146,7 @@ def _poll_once() -> int:
             if not fx or not (fx["live"] or fx["final"]):
                 continue
             sh, sa = _oriented_scores(m, fx)
-            apply_result(conn, m, sh, sa, fx["final"])
+            settle_match(conn, m, sh, sa, fx["final"])
             updated += 1
         conn.commit()
         return updated
@@ -1049,24 +1172,10 @@ def _start_poller():
         return
     _poller_started = True
     threading.Thread(target=_poller_loop, daemon=True).start()
-    print(f"[poller] started · provider={SCORE_PROVIDER} · every {POLL_INTERVAL_SEC}s · window {POLL_WINDOW_MIN}min", flush=True)
+    print(f"[poller] started · provider={SCORE_PROVIDER} · league={ESPN_LEAGUE} · "
+          f"every {POLL_INTERVAL_SEC}s · window {POLL_WINDOW_MIN}min", flush=True)
 
-@app.post("/admin/lock")
-def lock_match(body: LockIn, user=Depends(require_admin)):
-    conn = get_db()
-    created = 0
-    if body.locked:  # betting closed — lock in the default pick for anyone who hasn't bet
-        # clear any force-open override so the manual close actually takes effect
-        conn.execute("UPDATE matches SET locked=1, force_open=0 WHERE id=?", (body.match_id,))
-        match = conn.execute("SELECT * FROM matches WHERE id=?", (body.match_id,)).fetchone()
-        if match:
-            created = ensure_default_predictions(conn, dict(match))
-    else:  # betting re-opened — authoritative override past the cutoff / LIVE gate
-        conn.execute("UPDATE matches SET locked=0, force_open=1 WHERE id=?", (body.match_id,))
-    conn.commit()
-    conn.close()
-    return {"ok": True, "defaults_added": created}
-
+# ─── SQL console (read-only) ────────────────────────────────
 _FORBIDDEN = re.compile(r"\b(insert|update|delete|drop|alter|attach|detach|create|replace|pragma|vacuum|reindex)\b", re.I)
 
 @app.post("/admin/query")
@@ -1091,13 +1200,13 @@ def admin_query(body: QueryIn, user=Depends(require_admin)):
     conn.close()
     return {"columns": cols, "rows": rows, "row_count": len(rows)}
 
-# editable result cells — whitelisted tables/columns only, by row id
 _EDITABLE = {
-    "users": {"display_name", "username", "is_admin", "knockout_eligible"},
+    "users": {"display_name", "username", "is_admin"},
     "teams": {"name", "flag"},
     "matches": {"team_home", "team_away", "team_home_flag", "team_away_flag", "stage",
-                "handicap_team", "handicap_value", "kickoff_time", "score_home", "score_away", "status", "locked", "force_open", "multiplier"},
-    "predictions": {"predicted_winner", "points"},
+                "handicap_team", "handicap_value", "odds_home", "odds_away",
+                "kickoff_time", "play_date", "score_home", "score_away", "status",
+                "locked", "force_open"},
 }
 
 @app.post("/admin/update_cell")
@@ -1112,61 +1221,37 @@ def update_cell(body: CellIn, user=Depends(require_admin)):
     return {"ok": True}
 
 # ─── Leaderboard ────────────────────────────────────────────
-# Group Stage and knockout (Round of 32 → Final) are scored as separate boards
-# so the knockout phase effectively "starts from zero" — plus an overall board
-# summing everything. No extra table: it's just a CASE on matches.stage.
-_PHASE_COND = {
-    "group":    "m.stage = 'Group Stage'",
-    "knockout": "m.stage != 'Group Stage'",
-    "overall":  "1=1",
-}
-
 @app.get("/leaderboard")
-def leaderboard(phase: str = "overall", user=Depends(get_current_user)):
-    cond = _PHASE_COND.get(phase, _PHASE_COND["overall"])
-    # knockout board only lists players still flagged in for this round —
-    # someone who dropped out shouldn't clutter it with a static 0
-    roster_filter = "AND u.knockout_eligible=1" if phase == "knockout" else ""
-    # champion-pick bonus counts toward the knockout and overall boards
-    champ_bonus = ("COALESCE((SELECT cp.points FROM champion_picks cp WHERE cp.user_id=u.id),0)"
-                   if phase in ("knockout", "overall") else "0")
+def leaderboard(user=Depends(get_current_user)):
+    """Ranked by credits on hand. `net` is realised profit/loss; `at_risk` is
+    what is still sitting in unsettled bets."""
     conn = get_db()
-    rows = conn.execute(f"""
-        SELECT u.display_name, u.username,
-               COALESCE(SUM(CASE WHEN {cond} THEN p.points END),0) + {champ_bonus} as total_points,
-               COUNT(CASE WHEN {cond} THEN p.id END) as total_predictions,
-               COUNT(CASE WHEN {cond} AND p.points = 2 * COALESCE(m.multiplier,1) THEN 1 END) as wins,
-               COUNT(CASE WHEN {cond} AND m.status='finished' THEN 1 END) as finished
-        FROM users u
-        LEFT JOIN predictions p ON u.id=p.user_id
-        LEFT JOIN matches m ON p.match_id=m.id
-        WHERE u.is_admin=0 {roster_filter}
-        GROUP BY u.id ORDER BY total_points DESC, wins DESC
-    """).fetchall()
+    rows = conn.execute("""
+        SELECT u.display_name, u.username, u.credits,
+               COALESCE(SUM(CASE WHEN b.status != 'void' THEN b.stake END),0) AS staked,
+               COALESCE(SUM(CASE WHEN b.status='open' THEN b.stake END),0) AS at_risk,
+               COALESCE(SUM(CASE WHEN b.status='settled' THEN b.payout - b.stake END),0) AS net,
+               COUNT(CASE WHEN b.status != 'void' THEN 1 END) AS bets,
+               COUNT(CASE WHEN b.status='settled' AND b.outcome > 0 THEN 1 END) AS wins,
+               COUNT(CASE WHEN b.status='settled' AND b.outcome < 0 THEN 1 END) AS losses
+        FROM users u LEFT JOIN bets b ON b.user_id=u.id
+        WHERE u.is_admin=0
+        GROUP BY u.id
+        ORDER BY (u.credits + COALESCE(SUM(CASE WHEN b.status='open' THEN b.stake END),0)) DESC,
+                 net DESC""").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 class NoCacheStaticFiles(StaticFiles):
-    """Serve static assets with revalidation so deploys show up immediately.
-
-    Without this, browsers happily keep serving an old app.js/styles.css for
-    hours after a deploy. `no-cache` doesn't disable caching — it forces the
-    browser to revalidate against the server (cheap 304 when unchanged), so a
-    freshly-deployed file is always picked up on the next load.
-    """
+    """Serve static assets with revalidation so deploys show up immediately."""
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
         ctype = resp.headers.get("content-type", "")
         if path in ("", "/", "index.html") or ctype.startswith("text/html"):
-            # The HTML entry point can't be cache-busted with ?v= (nothing
-            # references it with a version), so forbid storing it outright —
-            # every navigation re-fetches the current index.html and thus the
-            # current ?v= asset references. The doc is tiny; cost is negligible.
             resp.headers["Cache-Control"] = "no-store"
             resp.headers["Pragma"] = "no-cache"
             resp.headers["Expires"] = "0"
         else:
-            # hashed/versioned assets: cheap 304 revalidation
             resp.headers["Cache-Control"] = "no-cache, must-revalidate"
         return resp
 

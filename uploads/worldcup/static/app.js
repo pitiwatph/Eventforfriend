@@ -1,4 +1,4 @@
-/* app.js — World Cup Prediction front-end controller.
+/* app.js — Event For Friend, credit-betting front-end controller.
    Talks to the FastAPI backend; on a network failure it transparently
    falls back to the in-memory DemoServer so the page still works. */
 (function () {
@@ -7,41 +7,29 @@
   // ── state ────────────────────────────────────────────────────────
   const S = {
     token: null,
-    me: null,            // {id, username, display_name, is_admin}
-    demo: false,         // running against DemoServer?
+    me: null,            // {id, username, display_name, is_admin, credits, …}
+    demo: false,
     matches: [],
-    mine: [],            // my predictions (joined w/ match)
-    myById: {},          // match_id -> predicted_winner
-    leaderboard: [],     // alias of lb.overall, kept for myStats()/rank
-    lb: { overall: [], group: [], knockout: [] },
-    lbPhase: 'knockout',
-    teams: [],           // registry [{id,name,flag}]
+    days: [],            // [{play_date, status, matches, finished, first_kickoff}]
+    myBets: [],
+    betsByMatch: {},     // match_id -> [bet, …] (mine)
+    ledger: [],
+    leaderboard: [],
+    teams: [],
     stages: [],
-    users: [],           // admin: user list
+    users: [],
     view: 'matches',
+    day: null,           // selected matchday on the betting screen
     cdTimer: null,
-    hdcpTeam: null,      // admin handicap selection
-    resultsDirty: true,  // lazy-render the (potentially large) results view
-    defaulted: {},       // match_id -> true when pick came from the system default
-    apiFixtures: [],     // admin: API-Football WC2026 fixtures, for manual mapping
-    settings: { home_stats: ['knockout', 'wins'], lb_tabs: ['knockout'] },
-    champion: null,      // /champion payload: deadline, teams, my_pick, picks (after lock)…
+    hdcpTeam: null,      // admin: handicap side selection
+    pick: {},            // match_id -> side the user has tapped (pre-submit)
+    apiFixtures: [],
+    cutoffMin: 10,
   };
-  // Display is currently FIXED (admin config UI removed): home shows Knockout +
-  // Wins, leaderboard shows only the Knockout tab. The /settings table and
-  // endpoints are kept on the backend so per-phase data is retained and the
-  // configurable UI can be brought back later — the client just ignores the
-  // stored config for now and renders FIXED_DISPLAY.
-  const FIXED_DISPLAY = { home_stats: ['knockout', 'wins'], lb_tabs: ['knockout'] };
-  const HOME_STAT_LABELS = { knockout: '🔥 น็อคเอาท์ · Knockout', overall: '🏆 รวมทั้งหมด · Overall', wins: 'ชนะเต็ม · Wins' };
-  const LB_TAB_LABELS = { overall: '🏆 รวมทั้งหมด', group: '🏟️ รอบแบ่งกลุ่ม', knockout: '🔥 น็อคเอาท์' };
-  const HOME_STAT_KEYS_ORDER = ['knockout', 'overall', 'wins'];
-  const LB_TAB_KEYS_ORDER = ['overall', 'group', 'knockout'];
   const LS = 'wc26_token';
   // Must match the ?v= query on this file in index.html and APP_BUILD on the
-  // server. If the server reports a newer build, the client reloads once to
-  // pull the fresh entry point (see reloadAll).
-  const BUILD = '15';
+  // server. If the server reports a newer build, the client reloads once.
+  const BUILD = '16';
 
   // ── api: try network, fall back to demo ──────────────────────────
   function enterDemo() {
@@ -66,12 +54,10 @@
         }
         res = await fetch(path, opts);
       } catch (e) {
-        enterDemo();                              // network/connection failure → demo
+        enterDemo();
         res = null;
       }
       if (res) {
-        // A real FastAPI backend always answers our endpoints with JSON.
-        // A bare static host (or no server) returns HTML/404 → treat as no backend.
         const ct = (res.headers.get('content-type') || '').toLowerCase();
         if (!ct.includes('application/json')) {
           enterDemo();
@@ -82,7 +68,6 @@
         }
       }
     }
-    // demo path
     const r = window.DemoServer.handle(method, path, { body, form, token: S.token });
     if (r.status >= 400) throw { handled: true, status: r.status, detail: r.data.detail };
     return r.data;
@@ -102,1245 +87,832 @@
     toast._t = setTimeout(() => (t.className = ''), 2400);
   }
 
-  // backend stores kickoff as naive Bangkok local time (UTC+7 logic in api).
-  // We parse as local for display/countdown — consistent within demo & deploy.
+  // money: 2dp only when needed, thousands separated
+  function money(n) {
+    const v = Math.round((Number(n) || 0) * 100) / 100;
+    return v.toLocaleString('th-TH', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  }
+  const signed = (n) => (Number(n) > 0 ? '+' : '') + money(n);
+
+  // Decimal odds -> Thai "water". 1.90 => 0.90 (win 90 on a 100 stake).
+  const water = (odds) => (Number(odds) - 1).toFixed(2);
+
+  // backend stores kickoff as naive Bangkok local time.
   const koDate = (s) => new Date((s || '').replace(' ', 'T'));
   function fmtKO(s) {
     const d = koDate(s);
     if (isNaN(d)) return s || '';
     return d.toLocaleString('th-TH', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   }
-  const CUTOFF_MS = 30 * 60 * 1000;
-  function matchState(m) {
-    if (m.status === 'finished') return 'finished';
-    // admin force-open is authoritative: re-opens betting past the cutoff and
-    // even while LIVE (only a finished match, above, can't be re-opened).
-    if (m.force_open) return 'open';
-    const ko = koDate(m.kickoff_time).getTime();
-    const now = Date.now();
-    if (m.locked) return 'closed';                  // admin manually closed betting
-    if (m.status === 'live') return 'live';         // backend marked in-progress
-    if (now >= ko) return 'live';                   // kicked off
-    if (now >= ko - CUTOFF_MS) return 'locked';    // within 30-min cutoff
-    return 'open';
+  function fmtDay(iso) {
+    const d = new Date(iso + 'T00:00');
+    if (isNaN(d)) return iso;
+    return d.toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' });
   }
-  // minutes elapsed since kickoff (negative before kickoff); for live phases
-  function elapsedMin(m) { return Math.floor((Date.now() - koDate(m.kickoff_time).getTime()) / 60000); }
-  function livePhase(m) {
-    const e = elapsedMin(m);
-    if (e < 55) return { label: '🟢 ครึ่งแรก', e };
-    if (e < 135) return { label: '🟡 ครึ่งหลัง', e };
-    return { label: '🔴 จบเกม', e };
-  }
-  const canBet = (st) => st === 'open';
+  const cutoffMs = () => S.cutoffMin * 60 * 1000;
+  const msToCutoff = (m) => koDate(m.kickoff_time).getTime() - cutoffMs() - Date.now();
 
-  // system default pick: handicap team if there's a line, else the home (left) team
-  function defaultPick(m) {
-    return (m.handicap_value && m.handicap_value > 0) ? m.handicap_team : m.team_home;
-  }
-  const STAGE_ABBR = {
-    'Group Stage': 'GROUP', 'Round of 32': 'R32', 'Round of 16': 'R16',
-    'Quarter-finals': 'QF', 'Semi-finals': 'SF', 'Third-Place Play-off': '3RD', 'The Final': 'FINAL',
-  };
-  function stageBadge(stage) {
-    if (!stage) return '';
-    const ab = STAGE_ABBR[stage] || stage;
-    const cls = stage === 'The Final' ? 'stage-final' : (stage === 'Group Stage' ? 'stage-group' : 'stage-ko');
-    return `<span class="stage-badge ${cls}">${esc(ab)}</span>`;
-  }
-  // point-multiplier badge — only shown for boosted matches (x2 / x4)
-  function multBadge(m) {
-    const x = +(m && m.multiplier) || 1;
-    return x > 1 ? `<span class="mult-badge">×${x}</span>` : '';
-  }
-
-  // points → badge
-  function ptsBadge(p) {
-    if (p == null) return `<span class="pts pts-pending">รอผล</span>`;
-    const cls = p >= 2 ? 'pts-2' : p >= 1.5 ? 'pts-15' : p >= 1 ? 'pts-1' : p > 0 ? 'pts-05' : 'pts-0';
-    const label = p >= 2 ? 'ชนะเต็ม' : p === 1 ? 'คืนเงิน' : p === 0 ? 'เสียเต็ม' : 'บางส่วน';
-    return `<span class="pts ${cls}">+${(+p).toLocaleString(undefined, { maximumFractionDigits: 2 })} · ${label}</span>`;
-  }
   function hdcpLabel(m) {
-    const v = m.handicap_value;
-    const sign = v === 0 ? '' : '−' + v;
-    return `${esc(m.handicap_team)} ต่อ <b>${v === 0 ? 'เสมอ' : v}</b>`;
+    const v = Number(m.handicap_value) || 0;
+    if (!v) return 'เสมอ · ราคาเรียบ';
+    return `${esc(m.handicap_team)} ต่อ ${v}`;
   }
 
-  // ════════════════════════════════════════════════════════════════
-  //  AUTH  (self-registration disabled — Admin creates users)
-  // ════════════════════════════════════════════════════════════════
+  // outcome (-1 … 1) -> reuse the existing pts-* badge palette
+  function outcomeBadge(b) {
+    if (b.status === 'void') return '<span class="pts pts-pending">ยกเลิก</span>';
+    if (b.status !== 'settled' || b.outcome == null) return '<span class="pts pts-pending">รอผล</span>';
+    const o = Number(b.outcome), net = Number(b.payout) - Number(b.stake);
+    const cls = o > 0.6 ? 'pts-2' : o > 0 ? 'pts-15' : o === 0 ? 'pts-1' : o > -0.6 ? 'pts-05' : 'pts-0';
+    const lbl = o > 0.6 ? 'ชนะ' : o > 0 ? 'ชนะครึ่ง' : o === 0 ? 'คืนเงิน' : o > -0.6 ? 'เสียครึ่ง' : 'เสีย';
+    return `<span class="pts ${cls}">${lbl} ${signed(net)}</span>`;
+  }
+
   function authError(msg) {
-    const e = $('authErr'); e.textContent = msg; e.classList.add('show');
+    const e = $('authErr');
+    e.textContent = msg || '';
+    e.className = msg ? 'auth-err show' : 'auth-err';
   }
 
+  // ── auth ─────────────────────────────────────────────────────────
   async function doLogin(ev) {
     ev.preventDefault();
+    authError('');
     try {
-      const data = await api('POST', '/token', { form: { username: $('loginUser').value.trim(), password: $('loginPass').value } });
-      S.token = data.access_token;
+      const d = await api('POST', '/token', { form: { username: $('loginUser').value.trim(), password: $('loginPass').value } });
+      S.token = d.access_token;
       localStorage.setItem(LS, S.token);
       await boot();
-    } catch (e) { authError(e.detail || 'เข้าสู่ระบบไม่สำเร็จ'); }
+    } catch (e) {
+      authError(e.detail || 'เข้าสู่ระบบไม่สำเร็จ');
+    }
   }
+
   function logout() {
     localStorage.removeItem(LS);
     S.token = null; S.me = null;
-    if (S.cdTimer) clearInterval(S.cdTimer);
+    clearInterval(S.cdTimer);
     $('appShell').style.display = 'none';
     $('authScreen').style.display = 'flex';
-    $('authErr').classList.remove('show');
+    $('loginPass').value = '';
   }
 
-  // ════════════════════════════════════════════════════════════════
-  //  BOOT / DATA
-  // ════════════════════════════════════════════════════════════════
   async function boot() {
     try {
       S.me = await api('GET', '/me');
-    } catch (e) { logout(); return; }
-
-    S.defaulted = {};
-    $('authScreen').style.display = 'none';
-    $('appShell').style.display = 'flex';
-    $('topAvatar').textContent = initials(S.me.display_name);
-    $('adminTab').style.display = S.me.is_admin ? '' : 'none';
-    await reloadAll();
-    if (!S.me.is_admin) await applyDefaults();   // admins aren't players
-    go('matches');
-  }
-
-  // auto-select the system default on any open match the user hasn't picked,
-  // and persist it immediately (no confirmation needed) until they change it.
-  async function applyDefaults() {
-    const todo = S.matches.filter((m) => canBet(matchState(m)) && !S.myById[m.id]);
-    if (!todo.length) return;
-    for (const m of todo) {
-      const team = defaultPick(m);
-      try {
-        await api('POST', '/predictions', { body: { match_id: m.id, predicted_winner: team } });
-        S.myById[m.id] = team;
-        S.defaulted[m.id] = true;
-      } catch (e) { /* locked/cutoff — skip */ }
+    } catch (e) {
+      logout(); return;
     }
-    try {
-      const mine = await api('GET', '/predictions/mine');
-      S.mine = mine; S.myById = {};
-      mine.forEach((p) => (S.myById[p.match_id] = p.predicted_winner));
-    } catch (e) {}
-    renderAll();
+    $('authScreen').style.display = 'none';
+    $('appShell').style.display = 'block';
+    $('adminTab').style.display = S.me.is_admin ? '' : 'none';
+    $('topAvatar').textContent = initials(S.me.display_name);
+    await reloadAll();
+    clearInterval(S.cdTimer);
+    S.cdTimer = setInterval(tick, 1000);
   }
 
   async function reloadAll() {
-    const [matches, mine, lbOverall, lbGroup, lbKnockout, teams, stages, settings, champion] = await Promise.all([
-      api('GET', '/matches'),
-      api('GET', '/predictions/mine'),
-      api('GET', '/leaderboard?phase=overall'),
-      api('GET', '/leaderboard?phase=group'),
-      api('GET', '/leaderboard?phase=knockout'),
-      api('GET', '/teams').catch(() => []),
-      api('GET', '/stages').catch(() => ['Group Stage', 'Round of 32', 'Round of 16', 'Quarter-finals', 'Semi-finals', 'Third-Place Play-off', 'The Final']),
-      api('GET', '/settings').catch(() => null),
-      api('GET', '/champion').catch(() => null),
-    ]);
-    S.matches = matches;
-    S.mine = mine;
-    S.lb = { overall: lbOverall, group: lbGroup, knockout: lbKnockout };
-    S.leaderboard = lbOverall;
-    S.teams = teams || [];
-    S.stages = stages || [];
-    S.champion = champion;
-    // Display is fixed for now (admin config UI removed); ignore the stored
-    // display config but still use /settings to detect a new build and reload.
-    if (settings && settings.build && BUILD && settings.build !== BUILD) {
-      // A new deploy is live but this tab is running an old bundle — reload once
-      // (guarded per target build so a client that genuinely can't fetch the new
-      // bundle never loops) to pull the fresh, no-store entry point.
-      const k = 'wc26_reloaded_' + settings.build;
-      let already = true;   // fail safe: if storage is unusable, do NOT reload
-      try { already = !!sessionStorage.getItem(k); if (!already) sessionStorage.setItem(k, '1'); }
-      catch (_) { already = true; }
-      if (!already) { location.reload(); return; }
+    try {
+      const [settings, matches, days, bets, lb, teams, stages] = await Promise.all([
+        api('GET', '/settings'), api('GET', '/matches'), api('GET', '/bet_days'),
+        api('GET', '/bets/mine'), api('GET', '/leaderboard'),
+        api('GET', '/teams'), api('GET', '/stages'),
+      ]);
+      if (settings && settings.build && settings.build !== BUILD && !S.demo) {
+        // a newer bundle is deployed — pull it once
+        location.reload(); return;
+      }
+      if (settings && settings.cutoff_min) S.cutoffMin = settings.cutoff_min;
+      S.matches = matches; S.days = days; S.myBets = bets;
+      S.leaderboard = lb; S.teams = teams; S.stages = stages;
+      S.me = await api('GET', '/me');
+
+      S.betsByMatch = {};
+      bets.forEach((b) => {
+        if (b.status === 'void') return;
+        (S.betsByMatch[b.match_id] = S.betsByMatch[b.match_id] || []).push(b);
+      });
+
+      // default the day selector to the first day that is open, else the next
+      // day with unfinished fixtures, else the last day
+      if (!S.day || !S.days.some((d) => d.play_date === S.day)) {
+        const open = S.days.find((d) => d.status === 'open');
+        const next = S.days.find((d) => d.finished < d.matches);
+        S.day = (open || next || S.days[S.days.length - 1] || {}).play_date || null;
+      }
+      if (S.me.is_admin) {
+        S.users = await api('GET', '/admin/users').catch(() => []);
+        S.ledger = await api('GET', '/admin/ledger').catch(() => []);
+      } else {
+        S.ledger = await api('GET', '/ledger/mine').catch(() => []);
+      }
+      renderAll();
+    } catch (e) {
+      if (e && e.status === 401) { logout(); return; }
+      toast(e.detail || 'โหลดข้อมูลไม่สำเร็จ', true);
     }
-    S.settings = { home_stats: [...FIXED_DISPLAY.home_stats], lb_tabs: [...FIXED_DISPLAY.lb_tabs] };
-    if (!S.settings.lb_tabs.includes(S.lbPhase)) S.lbPhase = S.settings.lb_tabs[0];
-    if (window.setTeamFlags) window.setTeamFlags(S.teams);
-    S.myById = {};
-    mine.forEach((p) => (S.myById[p.match_id] = p.predicted_winner));
-    S.resultsDirty = true;
-    renderAll();
   }
 
   function renderAll() {
     renderMe();
-    renderNext();
+    renderDayTabs();
     renderMatches();
     renderLeaderboard();
-    renderChampion();
     renderHistory();
     renderResults();
     if (S.me && S.me.is_admin) renderAdmin();
+    populateTeamDatalist();
   }
 
-  // ════════════════════════════════════════════════════════════════
-  //  VIEW: PREDICT
-  // ════════════════════════════════════════════════════════════════
-  function statsFor(board) {
-    const list = board || [];
-    const row = list.find((r) => r.display_name === S.me.display_name);
-    const rank = list.findIndex((r) => r.display_name === S.me.display_name) + 1;
-    return { rank: rank || '–', pts: row ? row.total_points : 0, wins: row ? row.wins : 0 };
-  }
-  function myStats() {
-    const overall = statsFor(S.lb.overall);
-    const knockout = statsFor(S.lb.knockout);
-    // streak: consecutive most-recent finished predictions scoring >= 1.5
-    const finished = S.mine.filter((p) => p.status === 'finished' && p.points != null)
-      .sort((a, b) => (b.kickoff_time || '').localeCompare(a.kickoff_time || ''));
-    let streak = 0;
-    for (const p of finished) { if (p.points >= 1.5 * (+p.multiplier || 1)) streak++; else break; }
-    // spread overall for any legacy callers expecting flat {rank,pts,wins}
-    return { ...overall, overall, knockout, streak, total: S.mine.length };
-  }
-
-  function homeStatBox(key, s, fmt) {
-    if (key === 'knockout') return `<div class="stat stat-hot"><div class="v">${fmt(s.knockout.pts)}<small> pt</small></div><div class="k">${HOME_STAT_LABELS.knockout}</div></div>`;
-    if (key === 'overall') return `<div class="stat"><div class="v">${fmt(s.overall.pts)}<small> pt</small></div><div class="k">${HOME_STAT_LABELS.overall}</div></div>`;
-    if (key === 'wins') return `<div class="stat"><div class="v">${s.knockout.wins}</div><div class="k">${HOME_STAT_LABELS.wins}</div></div>`;
-    return '';
-  }
+  // ── home hero ────────────────────────────────────────────────────
   function renderMe() {
-    const s = myStats();
-    const fmt = (n) => (+n).toLocaleString(undefined, { maximumFractionDigits: 1 });
-    const keys = S.settings.home_stats.length ? S.settings.home_stats : ['knockout'];
-    const boxes = keys.map((k) => homeStatBox(k, s, fmt)).join('');
+    const m = S.me || {};
+    const rank = S.leaderboard.findIndex((r) => r.username === m.username);
     $('meHero').innerHTML = `
       <div class="mecard">
-        <div class="rankpill"><span class="hash">#${s.knockout.rank}</span><span class="lbl">Rank · น็อคเอาท์</span></div>
-        <div class="hello">สวัสดี · welcome back</div>
-        <div class="name">${esc(S.me.display_name)} 👋</div>
-        <div class="me-stats" style="grid-template-columns:repeat(${keys.length},1fr)">${boxes}</div>
-      </div>`;
-  }
-
-  function nextMatch() {
-    return S.matches
-      .filter((m) => ['open', 'locked', 'closed', 'live'].includes(matchState(m)))
-      .sort((a, b) => koDate(a.kickoff_time) - koDate(b.kickoff_time))[0];
-  }
-
-  function renderNext() {
-    if (S.cdTimer) { clearInterval(S.cdTimer); S.cdTimer = null; }
-    const m = nextMatch();
-    const host = $('nextHero');
-    if (!m) { host.innerHTML = ''; return; }
-    host.innerHTML = `
-      <div class="next-wrap">
-        <div class="nextcard">
-          <span class="ribbon">⚡ นัดถัดไป · Next kickoff</span>
-          <div class="vs-row">
-            <div class="tm">${flag(m.team_home, m.team_home_flag)}<div class="nm">${esc(m.team_home)}</div></div>
-            <div class="vs-mid"><span class="vs">VS</span></div>
-            <div class="tm">${flag(m.team_away, m.team_away_flag)}<div class="nm">${esc(m.team_away)}</div></div>
+        ${rank >= 0 ? `<div class="rankpill"><span class="hash">#${rank + 1}</span><span class="lbl">Rank</span></div>` : ''}
+        <div class="hello">ยินดีต้อนรับ · Welcome</div>
+        <div class="name">${esc(m.display_name)}</div>
+        <div class="me-stats">
+          <div class="stat stat-hot">
+            <div class="v">${money(m.credits)}</div>
+            <div class="k">เครดิตคงเหลือ</div>
           </div>
-          <div class="countdown" id="cd"></div>
-          <div class="cd-live" id="cdLive" style="display:none"></div>
+          <div class="stat">
+            <div class="v">${signed(m.net)}</div>
+            <div class="k">กำไร/ขาดทุน</div>
+          </div>
+          <div class="stat">
+            <div class="v">${money(m.staked)}</div>
+            <div class="k">แทงไปแล้ว</div>
+          </div>
         </div>
       </div>`;
-    const ko = koDate(m.kickoff_time).getTime();
-    function tick() {
-      const diff = ko - Date.now();
-      const cd = $('cd'), live = $('cdLive');
-      if (!cd) return;
-      if (diff <= 0) {
-        cd.style.display = 'none'; live.style.display = '';
-        live.innerHTML = matchState(m) === 'live' ? '🔴 กำลังแข่ง · Live now' : '⏱ เริ่มแล้ว · Kicked off';
-        return;
-      }
-      const d = Math.floor(diff / 864e5), h = Math.floor(diff % 864e5 / 36e5),
-            mn = Math.floor(diff % 36e5 / 6e4), sc = Math.floor(diff % 6e4 / 1e3);
-      const unit = (v, l) => `<div class="cd-unit"><b>${String(v).padStart(2, '0')}</b><span>${l}</span></div>`;
-      cd.innerHTML = (d > 0 ? unit(d, 'วัน') : '') + unit(h, 'ชม.') + `<span class="cd-sep">:</span>` + unit(mn, 'นาที') + `<span class="cd-sep">:</span>` + unit(sc, 'วิ');
-    }
-    tick();
-    S.cdTimer = setInterval(tick, 1000);
   }
 
-  function predictBtns(m, st) {
-    const picked = S.myById[m.id];
-    const open = canBet(st);
-    function btn(team) {
-      let cls = 'pbtn';
-      if (st === 'finished') {
-        if (picked === team) {
-          const p = (S.mine.find((x) => x.match_id === m.id) || {}).points;
-          cls += p != null && p >= 1.5 ? ' correct' : ' wrong';
-        } else cls += ' locked';
-      } else {
-        if (picked === team) cls += S.defaulted[m.id] ? ' sel def' : ' sel';
-        if (!open) cls += ' locked';
-      }
-      const dis = (!open || st === 'finished') ? 'disabled' : '';
-      const fl = team === m.team_home ? m.team_home_flag : m.team_away_flag;
-      const tag = (open && S.defaulted[m.id] && picked === team) ? `<span class="def-tag">ค่าเริ่มต้น</span>` : '';
-      return `<button class="${cls}" ${dis} onclick="App.predict(${m.id}, ${JSON.stringify(team).replace(/"/g, '&quot;')})">
-        ${flag(team, fl)}<span>${esc(team)}</span>${tag}</button>`;
-    }
-    return `<div class="predict">${btn(m.team_home)}${btn(m.team_away)}</div>`;
+  // ── matchday tabs ────────────────────────────────────────────────
+  const DAY_CHIP = { open: 'chip-open', closed: 'chip-done', draft: 'chip-soon' };
+  const DAY_WORD = { open: 'เปิดรับ', closed: 'ปิดแล้ว', draft: 'ยังไม่เปิด' };
+
+  function renderDayTabs() {
+    const el = $('dayTabs');
+    if (!el) return;
+    if (!S.days.length) { el.innerHTML = ''; return; }
+    el.innerHTML = S.days.map((d) => `
+      <button class="lb-phase-tab ${d.play_date === S.day ? 'active' : ''}"
+              onclick="App.setDay('${d.play_date}')">
+        ${esc(fmtDay(d.play_date))}
+        <span class="chip ${DAY_CHIP[d.status] || 'chip-soon'}" style="margin-left:6px">${DAY_WORD[d.status] || ''}</span>
+      </button>`).join('');
   }
 
-  function chip(st) {
-    if (st === 'live') return `<span class="chip chip-live">🔴 LIVE</span>`;
-    if (st === 'finished') return `<span class="chip chip-done">จบแล้ว · FT</span>`;
-    if (st === 'closed') return `<span class="chip chip-closed">🔒 ปิดรับ · Closed</span>`;
-    if (st === 'locked') return `<span class="chip chip-soon">⏳ ใกล้เตะ · Locked</span>`;
-    return `<span class="chip chip-open">✏️ เปิดทาย · Open</span>`;
+  function setDay(d) { S.day = d; renderDayTabs(); renderMatches(); }
+
+  // ── match cards ──────────────────────────────────────────────────
+  function betChip(m) {
+    if (m.status === 'finished') return '<span class="chip chip-done">จบแล้ว</span>';
+    if (m.status === 'live') return '<span class="chip chip-live">● กำลังแข่ง</span>';
+    if (m.can_bet) return '<span class="chip chip-open">เปิดรับ</span>';
+    return '<span class="chip chip-soon">🔒 ปิดรับ</span>';
   }
 
-  function isKnockout(m) { return m.stage !== 'Group Stage'; }
+  function sideBtn(m, side, odds) {
+    const mine = (S.betsByMatch[m.id] || []).filter((b) => b.side === side);
+    const staked = mine.reduce((s, b) => s + Number(b.stake), 0);
+    const picked = S.pick[m.id] === side;
+    const cls = ['pbtn', picked ? 'sel' : '', staked ? 'has-bet' : ''].filter(Boolean).join(' ');
+    const dis = m.can_bet ? '' : 'disabled';
+    return `<button class="${cls}" ${dis} onclick="App.pick(${m.id}, ${JSON.stringify(side).replace(/"/g, '&quot;')})">
+        <span class="f">${flag(side)}</span>
+        <span class="pb-name">${esc(side)}</span>
+        <span class="pb-odds">${water(odds)}</span>
+        ${staked ? `<span class="pb-mine">แทงแล้ว ${money(staked)}</span>` : ''}
+      </button>`;
+  }
+
+  function stakeRow(m) {
+    if (!m.can_bet) return '';
+    const side = S.pick[m.id];
+    if (!side) return `<div class="stake-hint">แตะทีมที่จะแทงด้านบน</div>`;
+    const odds = side === m.team_home ? m.odds_home : m.odds_away;
+    return `
+      <div class="stake-row">
+        <div class="stake-quick">
+          ${[50, 100, 200, 500].map((v) => `<button type="button" onclick="App.setStake(${m.id},${v})">${v}</button>`).join('')}
+          <button type="button" onclick="App.setStake(${m.id},${Math.floor(S.me.credits)})">ทั้งหมด</button>
+        </div>
+        <div class="stake-go">
+          <input class="in in-mini" id="stake-${m.id}" type="number" min="1" step="1"
+                 placeholder="จำนวนเครดิต" oninput="App.previewStake(${m.id})">
+          <button class="btn btn-gold btn-sm" onclick="App.placeBet(${m.id})">แทง ${esc(side)}</button>
+        </div>
+        <div class="stake-prev" id="prev-${m.id}">ราคา ${water(odds)} · ชนะได้ —</div>
+      </div>`;
+  }
+
+  function myBetsOn(m) {
+    const mine = (S.betsByMatch[m.id] || []);
+    if (!mine.length) return '';
+    return `<div class="mybets">${mine.map((b) => `
+      <div class="mybet">
+        <span class="mb-side">${flag(b.side)} ${esc(b.side)}</span>
+        <span class="mb-terms">${esc(b.hdcp_team_taken)} ${b.line_taken} · น้ำ ${water(b.odds_taken)}</span>
+        <span class="mb-stake">${money(b.stake)}</span>
+        ${b.status === 'open' && m.can_bet
+          ? `<button class="lnk-edit" onclick="App.cancelBet(${b.id})">ยกเลิก</button>`
+          : outcomeBadge(b)}
+      </div>`).join('')}</div>`;
+  }
 
   function matchCard(m) {
-    const st = matchState(m);
-    const picked = S.myById[m.id];
-    const finished = st === 'finished';
-    const blocked = !finished && isKnockout(m) && S.me && !S.me.is_admin && S.me.knockout_eligible === false;
-    const hasScore = m.score_home != null && m.score_away != null;
-    let mid;
-    if (finished || (st === 'live' && hasScore)) {
-      mid = `<div class="mid"><div class="score">${m.score_home}–${m.score_away}</div>${st === 'live' ? '<div class="live-tag">🔴 LIVE</div>' : ''}</div>`;
-    } else {
-      mid = `<div class="mid"><div class="vstxt">VS</div></div>`;
-    }
-    let foot = '';
-    if (finished) {
-      const mp = S.mine.find((x) => x.match_id === m.id);
-      foot = `<div class="result-strip">
-        ${mp ? `<span class="predicted-tag">ทายไว้: <b>${flag(mp.predicted_winner, mp.predicted_winner === m.team_home ? m.team_home_flag : m.team_away_flag)} ${esc(mp.predicted_winner)}</b></span>` : `<span class="faint" style="font-size:12px">ไม่ได้ทายนัดนี้</span>`}
-        ${mp ? ptsBadge(mp.points) : ''}
-      </div>`;
-    } else if (blocked) {
-      foot = `<div class="locked-note">🚫 คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้ · not eligible for the knockout round</div>`;
-    } else if (st === 'locked' || st === 'live' || st === 'closed') {
-      const note = st === 'closed' ? '🔒 แอดมินปิดรับการทายแล้ว · closed by admin' : '🔒 ปิดรับการทายแล้ว · predictions closed';
-      foot = predictBtns(m, st) + `<div class="locked-note">${note}${picked ? ` (คุณทาย ${esc(picked)})` : ''}</div>`;
-    } else {
-      const isDef = S.defaulted[m.id];
-      const eff = picked || defaultPick(m);
-      foot = predictBtns(m, st) + `<div class="predicted-tag${isDef ? ' faint' : ''}">${isDef
-        ? `⭐ ระบบเลือก <b>${esc(eff)}</b> ให้เป็นค่าเริ่มต้น — แตะเพื่อเปลี่ยน · default, tap to change`
-        : `✓ คุณเลือก <b>${esc(eff)}</b> — แตะเพื่อเปลี่ยน · tap to change`}</div>`;
-    }
-    const hintH = m.handicap_team === m.team_home && m.handicap_value > 0 ? `ต่อ ${m.handicap_value}` : '';
-    const hintA = m.handicap_team === m.team_away && m.handicap_value > 0 ? `ต่อ ${m.handicap_value}` : '';
+    const mid = (m.score_home != null)
+      ? `<div class="score">${m.score_home}<i>–</i>${m.score_away}</div>`
+      : '<div class="vstxt">VS</div>';
+    const closed = !m.can_bet && m.status === 'upcoming'
+      ? `<div class="locked-note">🔒 ${esc(m.closed_reason || 'ปิดรับ')}</div>` : '';
     return `
-      <div class="match ${finished ? 'is-finished' : ''}">
+      <div class="match ${m.status === 'finished' ? 'is-finished' : ''}">
         <div class="match-top">
-          <span class="ko">${stageBadge(m.stage)}${multBadge(m)} 🗓 ${fmtKO(m.kickoff_time)}</span>
-          ${chip(st)}
+          ${betChip(m)}
+          <span class="ko">${esc(fmtKO(m.kickoff_time))}</span>
         </div>
         <div class="fixture">
-          <div class="fx-flag fx-h">${flag(m.team_home, m.team_home_flag)}</div>
-          <div class="fx-flag fx-a">${flag(m.team_away, m.team_away_flag)}</div>
+          <div class="fx-flag fx-h"><span class="flag">${flag(m.team_home, m.team_home_flag)}</span></div>
+          <div class="mid">${mid}</div>
+          <div class="fx-flag fx-a"><span class="flag">${flag(m.team_away, m.team_away_flag)}</span></div>
           <div class="fx-name fx-h">${esc(m.team_home)}</div>
           <div class="fx-name fx-a">${esc(m.team_away)}</div>
-          <div class="fx-hint fx-h">${hintH}</div>
-          <div class="fx-hint fx-a">${hintA}</div>
-          ${mid}
+          <div class="fx-hint fx-h">${m.handicap_team === m.team_home ? 'ต่อ' : ''}</div>
+          <div class="fx-hint fx-a">${m.handicap_team === m.team_away ? 'ต่อ' : ''}</div>
         </div>
-        <div class="hdcp">⚖️ ${hdcpLabel(m)} <span class="qmark" title="ทีมต่อต้องชนะมากกว่าค่าแฮนดิแคป จึงจะนับว่าทายถูก">?</span></div>
-        ${foot}
+        <div class="hdcp"><b>${hdcpLabel(m)}</b>
+          ${m.pool_bets ? `<span class="pool-chip">${m.pool_bets} บิล · ${money(m.pool_total)}</span>` : ''}
+        </div>
+        <div class="predict">
+          ${sideBtn(m, m.team_home, m.odds_home)}
+          ${sideBtn(m, m.team_away, m.odds_away)}
+        </div>
+        ${m.can_bet ? `<div class="cd-cut" data-cut="${m.id}"></div>` : ''}
+        ${stakeRow(m)}
+        ${closed}
+        ${myBetsOn(m)}
       </div>`;
   }
 
   function renderMatches() {
-    const open = S.matches.filter((m) => matchState(m) !== 'finished')
-      .sort((a, b) => koDate(a.kickoff_time) - koDate(b.kickoff_time));
-    $('matchList').innerHTML = open.length
-      ? open.map(matchCard).join('')
-      : `<div class="empty"><div class="ico">📭</div><div class="msg">ยังไม่มีนัดที่เปิดให้ทาย<br>No open fixtures — ดูผลที่เมนู “ผลการแข่งขัน”</div></div>`;
-  }
-
-  async function predict(matchId, team) {
-    try {
-      await api('POST', '/predictions', { body: { match_id: matchId, predicted_winner: team } });
-      S.myById[matchId] = team;
-      delete S.defaulted[matchId];   // user actively chose — no longer a default
-      toast('บันทึกการทายแล้ว ✓');
-      const mine = await api('GET', '/predictions/mine');
-      S.mine = mine; S.myById = {}; mine.forEach((p) => (S.myById[p.match_id] = p.predicted_winner));
-      renderMatches(); renderHistory();
-    } catch (e) { toast(e.detail || 'ทายไม่สำเร็จ', true); }
-  }
-
-  // ════════════════════════════════════════════════════════════════
-  //  VIEW: LEADERBOARD
-  // ════════════════════════════════════════════════════════════════
-  function setLbPhase(phase) {
-    S.lbPhase = phase;
-    renderLbTabs();
-    renderLeaderboard();
-  }
-
-  function renderLbTabs() {
-    const host = $('lbPhaseTabs');
-    if (!host) return;
-    const tabs = S.settings.lb_tabs.length ? S.settings.lb_tabs : ['overall'];
-    if (!tabs.includes(S.lbPhase)) S.lbPhase = tabs[0];
-    host.innerHTML = tabs.map((t) =>
-      `<button class="lb-phase-tab ${t === S.lbPhase ? 'active' : ''}" data-phase="${t}" onclick="App.setLbPhase('${t}')">${LB_TAB_LABELS[t] || t}</button>`
-    ).join('');
-  }
-
-  function renderLeaderboard() {
-    renderLbTabs();
-    const lb = S.lb[S.lbPhase] || [];
-    const podium = $('podium'), list = $('lbList');
-    if (!lb.length) {
-      podium.innerHTML = '';
-      const msg = S.lbPhase === 'knockout' ? 'รอบน็อคเอาท์ยังไม่เริ่ม · Knockout hasn\'t started'
-        : S.lbPhase === 'group' ? 'รอบแบ่งกลุ่มยังไม่มีคะแนน · No group scores yet'
-        : 'ยังไม่มีคะแนน · No scores yet';
-      list.innerHTML = `<div class="empty"><div class="ico">🏟️</div><div class="msg">${msg}</div></div>`;
+    const list = S.matches.filter((m) => m.play_date === S.day);
+    const el = $('matchList');
+    if (!S.days.length) {
+      el.innerHTML = '<div class="empty">ยังไม่มีนัด — รอแอดมินเพิ่มโปรแกรม</div>';
       return;
     }
+    const day = S.days.find((d) => d.play_date === S.day);
+    const banner = day && day.status !== 'open'
+      ? `<div class="day-banner">${day.status === 'closed' ? '🔒 วันนี้ปิดรับพนันแล้ว' : '⏳ แอดมินยังไม่เปิดรับพนันของวันนี้'}</div>` : '';
+    el.innerHTML = banner + (list.length
+      ? list.map(matchCard).join('')
+      : '<div class="empty">ไม่มีนัดในวันนี้</div>');
+    tick();   // fill the cutoff countdowns now instead of waiting a second
+  }
 
-    const top3 = lb.slice(0, 3);
-    const order = [top3[1], top3[0], top3[2]]; // 2nd, 1st, 3rd
-    const medals = { 0: '🥇', 1: '🥈', 2: '🥉' };
-    podium.innerHTML = `<div class="podium">` + order.map((r, idx) => {
-      if (!r) return `<div></div>`;
-      const realRank = lb.indexOf(r);
-      const cls = realRank === 0 ? 'pod-1' : realRank === 1 ? 'pod-2' : 'pod-3';
-      return `<div class="pod ${cls}">
-        <div class="medal">${medals[realRank]}</div>
-        <div class="pod-av">${initials(r.display_name)}</div>
-        <div class="pod-nm">${esc(r.display_name)}</div>
-        <div class="pod-pts">${(+r.total_points).toLocaleString(undefined, { maximumFractionDigits: 1 })}<small> pt</small></div>
-      </div>`;
-    }).join('') + `</div>`;
+  // per-second countdown to each match's betting cutoff
+  function tick() {
+    document.querySelectorAll('[data-cut]').forEach((el) => {
+      const m = S.matches.find((x) => String(x.id) === el.dataset.cut);
+      if (!m) return;
+      const left = msToCutoff(m);
+      if (left <= 0) { el.innerHTML = '<span class="cd-live">ปิดรับแล้ว</span>'; return; }
+      const s = Math.floor(left / 1000), h = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60;
+      el.innerHTML = `<span class="cut-lbl">ปิดรับใน</span> <b>${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}</b>`;
+    });
+  }
 
-    list.innerHTML = lb.map((r, i) => {
-      const me = S.me && r.display_name === S.me.display_name;
-      const acc = r.finished ? Math.round((r.wins / r.finished) * 100) : 0;
-      return `<div class="lb-row ${me ? 'me' : ''}">
+  // ── betting actions ──────────────────────────────────────────────
+  function pick(matchId, side) {
+    S.pick[matchId] = S.pick[matchId] === side ? null : side;
+    renderMatches();
+  }
+
+  function setStake(matchId, v) {
+    const el = $('stake-' + matchId);
+    if (el) { el.value = v; previewStake(matchId); }
+  }
+
+  function previewStake(matchId) {
+    const m = S.matches.find((x) => x.id === matchId);
+    const el = $('prev-' + matchId), inp = $('stake-' + matchId);
+    if (!m || !el || !inp) return;
+    const side = S.pick[matchId];
+    const odds = side === m.team_home ? m.odds_home : m.odds_away;
+    const stake = Number(inp.value) || 0;
+    const win = stake * (Number(odds) - 1);
+    el.innerHTML = `ราคา ${water(odds)} · ชนะได้ <b>${stake ? '+' + money(win) : '—'}</b>`
+      + (stake > S.me.credits ? ' <span class="over">เครดิตไม่พอ</span>' : '');
+  }
+
+  async function placeBet(matchId) {
+    const side = S.pick[matchId];
+    const inp = $('stake-' + matchId);
+    const stake = Number(inp && inp.value) || 0;
+    if (!side) return toast('เลือกทีมก่อน', true);
+    if (stake <= 0) return toast('ใส่จำนวนเครดิต', true);
+    try {
+      const r = await api('POST', '/bets', { body: { match_id: matchId, side, stake } });
+      S.pick[matchId] = null;
+      toast(`แทงสำเร็จ · ล็อกราคา ${water(r.odds_taken)} ที่เส้น ${r.line_taken}`);
+      await reloadAll();
+    } catch (e) {
+      toast(e.detail || 'แทงไม่สำเร็จ', true);
+    }
+  }
+
+  async function cancelBet(betId) {
+    if (!confirm('ยกเลิกบิลนี้และคืนเครดิต?')) return;
+    try {
+      await api('DELETE', '/bets/' + betId);
+      toast('ยกเลิกแล้ว · คืนเครดิต');
+      await reloadAll();
+    } catch (e) {
+      toast(e.detail || 'ยกเลิกไม่สำเร็จ', true);
+    }
+  }
+
+  // ── leaderboard ──────────────────────────────────────────────────
+  function renderLeaderboard() {
+    const rows = S.leaderboard;
+    const pod = $('podium'), list = $('lbList');
+    if (!rows.length) { pod.innerHTML = ''; list.innerHTML = '<div class="empty">ยังไม่มีผู้เล่น</div>'; return; }
+    const MEDAL = ['🥇', '🥈', '🥉'];
+    const top = rows.slice(0, 3);
+    // visual order puts the winner in the middle
+    pod.innerHTML = `<div class="podium">${[1, 0, 2].filter((i) => top[i]).map((i) => `
+      <div class="pod pod-${i + 1}">
+        <div class="medal">${MEDAL[i]}</div>
+        <div class="pod-av">${initials(top[i].display_name)}</div>
+        <div class="pod-nm">${esc(top[i].display_name)}</div>
+        <div class="pod-pts">${money(top[i].credits)}<small> เครดิต</small></div>
+      </div>`).join('')}</div>`;
+    list.innerHTML = rows.map((r, i) => `
+      <div class="lb-row ${r.username === S.me.username ? 'me' : ''}">
         <div class="rk">${i + 1}</div>
         <div class="lb-av">${initials(r.display_name)}</div>
         <div class="lb-info">
-          <div class="lb-nm">${esc(r.display_name)}${me ? '<span class="you-tag">คุณ</span>' : ''}</div>
-          <div class="lb-meta">ทาย ${r.total_predictions} · ชนะเต็ม ${r.wins}${r.finished ? ` · ${acc}%` : ''}</div>
+          <div class="lb-nm">${esc(r.display_name)}${r.username === S.me.username ? '<span class="you-tag">คุณ</span>' : ''}</div>
+          <div class="lb-meta">
+            ${r.bets} บิล · ชนะ ${r.wins} · แพ้ ${r.losses}
+            ${r.at_risk > 0 ? ` · ค้าง ${money(r.at_risk)}` : ''}
+          </div>
         </div>
-        <div class="lb-pts">${(+r.total_points).toLocaleString(undefined, { maximumFractionDigits: 1 })}<small> pt</small></div>
-      </div>`;
-    }).join('');
+        <div class="lb-pts">${money(r.credits)}<small><br>${signed(r.net)}</small></div>
+      </div>`).join('');
   }
 
-  // ════════════════════════════════════════════════════════════════
-  //  VIEW: CHAMPION (ทายแชมป์ — pick 1 of the 8 quarter-finalists)
-  // ════════════════════════════════════════════════════════════════
-  function renderChampion() {
-    const host = $('champBody');
-    if (!host) return;
-    const c = S.champion;
-    const sub = $('champSub');
-    if (!c) {
-      host.innerHTML = `<div class="empty"><div class="ico">🏆</div><div class="msg">โหลดข้อมูลทายแชมป์ไม่สำเร็จ</div></div>`;
-      return;
-    }
-    const fmtPts = (+c.points).toLocaleString(undefined, { maximumFractionDigits: 1 });
-
-    if (!c.locked) {
-      // ── picking open ──
-      if (sub) sub.textContent = `เลือก 1 ทีมจาก 8 ทีมสุดท้าย · ปิดรับ ${fmtKO(c.deadline)}`;
-      if (!c.eligible) {
-        host.innerHTML = `<div class="empty"><div class="ico">🚫</div><div class="msg">คุณไม่ได้รับสิทธิ์ทายผลรอบน็อคเอาท์นี้</div></div>`;
-        return;
-      }
-      if (!(c.teams || []).length) {
-        host.innerHTML = `<div class="card">
-          <div class="empty"><div class="ico">⏳</div><div class="msg">รอแอดมินเพิ่มรายชื่อทีมให้ทาย<br>Waiting for the admin to set the teams</div></div>
-        </div>`;
-        return;
-      }
-      host.innerHTML = `<div class="card">
-        <div class="faint" style="font-size:12px;margin-bottom:12px">ทายถูกรับ <b>${fmtPts} คะแนน</b> เข้าตารางน็อคเอาท์ · เปลี่ยนใจได้จนถึง <b>${fmtKO(c.deadline)}</b> · ตอนนี้ทายแล้ว ${c.total_picked} คน (เปิดเผยเมื่อปิดรับ)</div>
-        <div class="seg" style="grid-template-columns:1fr 1fr">
-          ${c.teams.map((t) => `<button class="${c.my_pick === t.name ? 'on' : ''}" onclick="App.pickChampion(${JSON.stringify(t.name).replace(/"/g, '&quot;')})">${flag(t.name, t.flag)} ${esc(t.name)}</button>`).join('')}
-        </div>
-        ${c.my_pick ? `<div style="margin-top:12px;font-size:13px">✓ คุณทาย <b style="color:var(--gold-bright)">${esc(c.my_pick)}</b> — แตะทีมอื่นเพื่อเปลี่ยน</div>` : `<div class="faint" style="margin-top:12px;font-size:12px">ยังไม่ได้เลือก — แตะทีมที่คิดว่าจะได้แชมป์</div>`}
-      </div>`;
-      return;
-    }
-
-    // ── locked: reveal everyone's pick ──
-    if (sub) sub.textContent = c.champion_team ? `🎉 แชมป์: ${c.champion_team}` : `ปิดรับแล้ว · รอผลแชมป์ตัวจริง`;
-    const flagOf = {};
-    (c.teams || []).forEach((t) => (flagOf[t.name] = t.flag));
-    const by = {};
-    (c.picks || []).forEach((p) => ((by[p.team] ||= []).push(p)));
-    const order = Object.keys(by).sort((a, b) => {
-      if (c.champion_team) {                    // champion team first
-        if (a === c.champion_team) return -1;
-        if (b === c.champion_team) return 1;
-      }
-      return by[b].length - by[a].length || a.localeCompare(b);
-    });
-    if (!order.length) {
-      host.innerHTML = `<div class="empty"><div class="ico">🏆</div><div class="msg">ไม่มีใครทันทายแชมป์รอบนี้</div></div>`;
-      return;
-    }
-    host.innerHTML = `<div class="champ-rev">` + order.map((team) => {
-      const win = c.champion_team === team;
-      return `<div class="crow ${win ? 'win' : ''}">
-        <div class="chead">${flag(team, flagOf[team])} ${esc(team)} ${win ? '👑' : ''}<i>${by[team].length} คน</i></div>
-        <div class="cnames">${by[team].map((p) => {
-          const me = S.me && p.username === S.me.username;
-          return `<span class="${p.points > 0 ? 'win' : ''}">${esc(p.display_name)}${me ? ' (คุณ)' : ''}${p.points > 0 ? ` +${(+p.points).toLocaleString(undefined, { maximumFractionDigits: 1 })}` : ''}</span>`;
-        }).join('')}</div>
-      </div>`;
-    }).join('') + `</div>
-    ${c.my_pick ? `<div class="faint" style="margin-top:12px;font-size:12px;text-align:center">คุณทาย: <b>${esc(c.my_pick)}</b>${c.champion_team ? (c.my_pick === c.champion_team ? ` — ถูกต้อง! +${fmtPts} คะแนน 🎉` : ' — เสียใจด้วย ไว้ลุ้นรอบหน้า') : ''}</div>` : ''}`;
-  }
-
-  async function pickChampion(team) {
-    try {
-      await api('POST', '/champion/pick', { body: { team } });
-      toast(`ทายแชมป์: ${team} ✓`);
-      await reloadAll();
-    } catch (e) { toast(e.detail || 'ทายแชมป์ไม่สำเร็จ', true); }
-  }
-
-  // ════════════════════════════════════════════════════════════════
-  //  VIEW: HISTORY
-  // ════════════════════════════════════════════════════════════════
+  // ── history: my bets + credit ledger ─────────────────────────────
   function renderHistory() {
-    const rows = [...S.mine].sort((a, b) => koDate(b.kickoff_time) - koDate(a.kickoff_time));
-    const fin = rows.filter((p) => p.status === 'finished' && p.points != null);
-    const total = fin.reduce((s, p) => s + p.points, 0);
-    const wins = fin.filter((p) => p.points === 2 * (+p.multiplier || 1)).length;
-    $('histSummary').innerHTML = rows.length ? `
-      <div class="mecard" style="margin-bottom:16px">
-        <div class="me-stats" style="margin-top:0">
-          <div class="stat"><div class="v">${rows.length}</div><div class="k">ทายทั้งหมด · Total</div></div>
-          <div class="stat"><div class="v">${(+total).toLocaleString(undefined, { maximumFractionDigits: 1 })}<small> pt</small></div><div class="k">แต้มรวม · Points</div></div>
-          <div class="stat"><div class="v">${wins}</div><div class="k">ชนะเต็ม · Wins</div></div>
-        </div>
-      </div>` : '';
-
-    $('histList').innerHTML = rows.length ? rows.map((p) => {
-      const st = matchState(p);
-      const hasScore = p.score_home != null && p.score_away != null;
-      const sc = hasScore ? `<span class="sc">${p.score_home}–${p.score_away}</span>` : `<span class="faint">vs</span>`;
-      return `<div class="hrow">
-        <div class="h-fixt">
-          <div class="h-teams">${flag(p.team_home, p.team_home_flag)} ${esc(p.team_home)} ${sc} ${esc(p.team_away)} ${flag(p.team_away, p.team_away_flag)}</div>
-          <div class="h-pick">ทาย: <b>${esc(p.predicted_winner)}</b> · ${fmtKO(p.kickoff_time)}</div>
-        </div>
-        ${p.points != null ? ptsBadge(p.points) : chip(st)}
+    const bets = S.myBets;
+    const settled = bets.filter((b) => b.status === 'settled');
+    const net = settled.reduce((s, b) => s + (Number(b.payout) - Number(b.stake)), 0);
+    $('histSummary').innerHTML = `
+      <div class="me-stats" style="margin-bottom:14px">
+        <div class="stat"><div class="v">${bets.filter((b) => b.status !== 'void').length}</div><div class="k">บิลทั้งหมด</div></div>
+        <div class="stat"><div class="v">${settled.filter((b) => b.outcome > 0).length}</div><div class="k">ชนะ</div></div>
+        <div class="stat stat-hot"><div class="v">${signed(net)}</div><div class="k">กำไร/ขาดทุน</div></div>
       </div>`;
-    }).join('') : `<div class="empty"><div class="ico">📜</div><div class="msg">ยังไม่มีประวัติการทาย<br>You haven't predicted yet</div></div>`;
+    $('histList').innerHTML = bets.length ? bets.map((b) => `
+      <div class="hrow">
+        <div class="h-fixt">
+          <div class="h-teams">
+            ${flag(b.team_home, b.team_home_flag)} ${esc(b.team_home)}
+            <span class="sc">${b.score_home != null ? `${b.score_home}–${b.score_away}` : 'v'}</span>
+            ${flag(b.team_away, b.team_away_flag)} ${esc(b.team_away)}
+          </div>
+          <div class="h-pick">
+            แทง <b>${esc(b.side)}</b> ${money(b.stake)} ·
+            ${esc(b.hdcp_team_taken)} ${b.line_taken} · น้ำ ${water(b.odds_taken)}
+            · ${esc(fmtKO(b.kickoff_time))}
+          </div>
+        </div>
+        ${outcomeBadge(b)}
+      </div>`).join('') : '<div class="empty">ยังไม่มีบิล</div>';
+
+    const led = $('ledgerList');
+    if (led) {
+      const REASON = { topup: '💰 แอดมินเติม', adjust: '⚙ ปรับยอด', bet: '🎯 แทง', payout: '🏆 รับเงิน', refund: '↩ คืนเงิน' };
+      led.innerHTML = S.ledger.length ? S.ledger.map((l) => `
+        <div class="hrow">
+          <div class="h-fixt">
+            <div class="h-teams">${REASON[l.reason] || esc(l.reason)}</div>
+            <div class="h-pick">${esc(l.note || '')} · ${esc(l.created_at || '')}</div>
+          </div>
+          <div class="led-amt">
+            <b class="${Number(l.delta) >= 0 ? 'up' : 'down'}">${signed(l.delta)}</b>
+            <span>คงเหลือ ${money(l.balance_after)}</span>
+          </div>
+        </div>`).join('') : '<div class="empty">ยังไม่มีรายการ</div>';
+    }
   }
 
-  // ════════════════════════════════════════════════════════════════
-  //  VIEW: RESULTS  (finished matches — built for ~104 fixtures)
-  // ════════════════════════════════════════════════════════════════
-  function ptsMini(p) {
-    if (p == null) return '';
-    const cls = p >= 2 ? 'pts-2' : p >= 1.5 ? 'pts-15' : p >= 1 ? 'pts-1' : p > 0 ? 'pts-05' : 'pts-0';
-    return `<span class="pts ${cls}">+${(+p).toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>`;
-  }
-
-  function resultRow(m) {
-    const mp = S.mine.find((x) => x.match_id === m.id);
-    const you = mp
-      ? `<span class="r-you">${ptsMini(mp.points)}<span class="r-pick">ทาย ${esc(mp.predicted_winner)}</span></span>`
-      : `<span class="r-you faint">—</span>`;
-    return `<div class="rrow">
-      <div class="r-fixt">
-        <span class="r-team r-h">${flag(m.team_home, m.team_home_flag)}<b>${esc(m.team_home)}</b></span>
-        <span class="r-score">${m.score_home}<i>–</i>${m.score_away}</span>
-        <span class="r-team r-a"><b>${esc(m.team_away)}</b>${flag(m.team_away, m.team_away_flag)}</span>
-      </div>
-      <div class="r-right">${multBadge(m)}${you}</div>
-    </div>`;
-  }
-
+  // ── results ──────────────────────────────────────────────────────
   function renderResults() {
-    const host = $('resultsList');
-    if (!host) return;
     const done = S.matches.filter((m) => m.status === 'finished');
-    // summary
-    const mineFin = S.mine.filter((p) => p.status === 'finished' && p.points != null);
-    const total = mineFin.reduce((s, p) => s + p.points, 0);
     $('resultsSummary').innerHTML = `
       <div class="res-summary">
-        <div><b>${done.length}</b><span>นัดจบแล้ว · Played</span></div>
-        <div><b>${mineFin.length}</b><span>คุณทาย · Your bets</span></div>
-        <div><b>${(+total).toLocaleString(undefined, { maximumFractionDigits: 1 })}</b><span>แต้มจากผล · Points</span></div>
+        <div><b>${done.length}</b><span>นัดที่จบ</span></div>
+        <div><b>${S.matches.length}</b><span>นัดทั้งหมด</span></div>
+        <div><b>${S.days.length}</b><span>วันแข่ง</span></div>
       </div>`;
-
-    if (!done.length) { host.innerHTML = `<div class="empty"><div class="ico">📊</div><div class="msg">ยังไม่มีผลการแข่งขัน<br>No results yet</div></div>`; S.resultsDirty = false; return; }
-
-    // group by stage; newest match first within a stage, and the stage holding
-    // the most recent match shown first so the latest result is always on top
-    const byStage = {};
-    done.forEach((m) => { (byStage[m.stage || 'Group Stage'] ||= []).push(m); });
-    const stageNewest = {};
-    Object.keys(byStage).forEach((sk) => {
-      stageNewest[sk] = Math.max(...byStage[sk].map((m) => koDate(m.kickoff_time).getTime()));
-    });
-    const stageKeys = Object.keys(byStage).sort((a, b) => stageNewest[b] - stageNewest[a]);
-    // single innerHTML write keeps 100+ rows fast
-    const html = stageKeys.map((sk) => {
-      const rows = byStage[sk].sort((a, b) => koDate(b.kickoff_time) - koDate(a.kickoff_time));
-      return `<div class="res-group">
-        <div class="res-stage-head">${stageBadge(sk)}<span>${esc(sk)}</span><i>${rows.length}</i></div>
-        ${rows.map(resultRow).join('')}
-      </div>`;
-    }).join('');
-    host.innerHTML = html;
-    S.resultsDirty = false;
+    // group finished fixtures by matchday, newest first
+    const byDay = {};
+    done.forEach((m) => (byDay[m.play_date] = byDay[m.play_date] || []).push(m));
+    const dayKeys = Object.keys(byDay).sort().reverse();
+    $('resultsList').innerHTML = dayKeys.length ? dayKeys.map((d) => `
+      <div class="res-group">
+        <div class="res-stage-head">📅 ${esc(fmtDay(d))}<i>${byDay[d].length} นัด</i></div>
+        ${byDay[d].map((m) => {
+          const mine = (S.betsByMatch[m.id] || []);
+          return `<div class="rrow">
+            <div class="r-fixt">
+              <div class="r-team r-h"><span class="flag">${flag(m.team_home, m.team_home_flag)}</span><b>${esc(m.team_home)}</b></div>
+              <div class="r-score">${m.score_home}<i>–</i>${m.score_away}</div>
+              <div class="r-team r-a"><b>${esc(m.team_away)}</b><span class="flag">${flag(m.team_away, m.team_away_flag)}</span></div>
+            </div>
+            <div class="r-you">
+              ${mine.length
+                ? mine.map((b) => `${outcomeBadge(b)}<div class="r-pick">${esc(b.side)} ${money(b.stake)}</div>`).join('')
+                : '<div class="r-pick">ไม่ได้แทง</div>'}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`).join('') : '<div class="empty">ยังไม่มีนัดที่จบ</div>';
   }
 
-  // ════════════════════════════════════════════════════════════════
-  //  VIEW: ADMIN
-  // ════════════════════════════════════════════════════════════════
-  // ── flag picker (registry-driven; emoji disabled) ─────────────────
-  function flagPrevHTML(val, name) {
-    val = (val || '').trim();
-    if (!window.isFlagUrl(val)) val = window.suggestFlag(name || '') || val;
-    if (window.isFlagUrl(val)) return `<img src="${val.replace(/"/g, '&quot;')}" alt="">`;
-    return `<span class="mono-prev">${window.teamMonogram(name || '?')}</span>`;
-  }
-  function updateFlagPrev(side) {
-    const input = $(side === 'home' ? 'amHomeFlag' : 'amAwayFlag');
-    const prev = $(side === 'home' ? 'amHomeFlagPrev' : 'amAwayFlagPrev');
-    const name = $(side === 'home' ? 'amHome' : 'amAway').value;
-    if (prev) prev.innerHTML = flagPrevHTML(input.value, name);
-  }
-  function onTeamInput(side) {
-    refreshHdcpSel();
-    const input = $(side === 'home' ? 'amHomeFlag' : 'amAwayFlag');
-    const name = $(side === 'home' ? 'amHome' : 'amAway').value;
-    if (input && !input.dataset.touched) input.value = window.suggestFlag(name) || '';
-    updateFlagPrev(side);
-  }
-  function onFlagInput(side) {
-    const input = $(side === 'home' ? 'amHomeFlag' : 'amAwayFlag');
-    if (input) input.dataset.touched = '1';
-    updateFlagPrev(side);
-  }
+  // ── admin ────────────────────────────────────────────────────────
   function populateTeamDatalist() {
     const dl = $('teamNames');
-    if (dl) dl.innerHTML = (S.teams || []).map((t) => `<option value="${esc(t.name)}"></option>`).join('');
-    const sl = $('amStage');
-    if (sl && !sl.dataset.filled) {
-      sl.innerHTML = (S.stages || []).map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
-      sl.dataset.filled = '1';
-    }
+    if (dl) dl.innerHTML = S.teams.map((t) => `<option value="${esc(t.name)}">`).join('');
   }
 
   function refreshHdcpSel() {
-    const home = $('amHome').value.trim(), away = $('amAway').value.trim();
-    const sel = $('amHdcpSel');
-    const opts = [home, away].filter(Boolean);
-    if (S.hdcpTeam && !opts.includes(S.hdcpTeam)) S.hdcpTeam = null;
-    if (!S.hdcpTeam && opts.length) S.hdcpTeam = opts[0];
-    const flags = { home: $('amHomeFlag') ? $('amHomeFlag').value : '', away: $('amAwayFlag') ? $('amAwayFlag').value : '' };
-    sel.innerHTML = ['__h', '__a'].map((slot, i) => {
-      const team = i === 0 ? home : away;
-      const fl = i === 0 ? flags.home : flags.away;
-      const on = team && team === S.hdcpTeam;
-      return `<button type="button" ${team ? '' : 'disabled'} class="${on ? 'on' : ''}" onclick="App.setHdcp(${JSON.stringify(team).replace(/"/g, '&quot;')})">
-        ${team ? flag(team, fl) + ' ' + esc(team) : (i === 0 ? 'เจ้าบ้าน' : 'ทีมเยือน')}</button>`;
-    }).join('');
+    const h = $('amHome').value.trim(), a = $('amAway').value.trim();
+    const el = $('amHdcpSel');
+    if (!el) return;
+    const opts = [h, a].filter(Boolean);
+    if (!opts.length) { el.innerHTML = '<span class="faint" style="font-size:11px">ใส่ชื่อทีมก่อน</span>'; return; }
+    if (!opts.includes(S.hdcpTeam)) S.hdcpTeam = opts[0];
+    el.innerHTML = opts.map((t) => `<button type="button" class="${S.hdcpTeam === t ? 'on' : ''}" onclick="App.setHdcp(${JSON.stringify(t).replace(/"/g, '&quot;')})">${flag(t)} ${esc(t)}</button>`).join('');
   }
-  function setHdcp(team) { if (team) { S.hdcpTeam = team; refreshHdcpSel(); } }
+  function setHdcp(t) { S.hdcpTeam = t; refreshHdcpSel(); }
+  function onTeamInput() { refreshHdcpSel(); updateFlagPrev(); }
+
+  function flagPrevHTML(name, url) { return url ? `<img class="flag-img" src="${esc(url)}" alt="">` : flag(name); }
+  function updateFlagPrev() {
+    const hp = $('amHomeFlagPrev'), ap = $('amAwayFlagPrev');
+    if (hp) hp.innerHTML = flagPrevHTML($('amHome').value.trim(), $('amHomeFlag').value.trim());
+    if (ap) ap.innerHTML = flagPrevHTML($('amAway').value.trim(), $('amAwayFlag').value.trim());
+  }
+  function onFlagInput() { updateFlagPrev(); }
+  function updateTeamPrev() {
+    const p = $('tmPrev');
+    if (p) p.innerHTML = flagPrevHTML($('tmName').value.trim(), $('tmFlag').value.trim());
+  }
 
   async function addMatch(ev) {
     ev.preventDefault();
-    const home = $('amHome').value.trim(), away = $('amAway').value.trim();
-    if (!S.hdcpTeam) S.hdcpTeam = home;
-    const homeFlag = ($('amHomeFlag').value || '').trim() || window.suggestFlag(home);
-    const awayFlag = ($('amAwayFlag').value || '').trim() || window.suggestFlag(away);
-    const ko = $('amKickoff').value;
+    const body = {
+      team_home: $('amHome').value.trim(), team_away: $('amAway').value.trim(),
+      team_home_flag: $('amHomeFlag').value.trim(), team_away_flag: $('amAwayFlag').value.trim(),
+      stage: $('amStage').value, handicap_team: S.hdcpTeam,
+      handicap_value: parseFloat($('amHdcpVal').value),
+      odds_home: parseFloat($('amOddsHome').value) || 1.90,
+      odds_away: parseFloat($('amOddsAway').value) || 1.90,
+      kickoff_time: $('amKickoff').value,
+    };
+    if (!body.handicap_team) return toast('เลือกทีมต่อก่อน', true);
     try {
-      await api('POST', '/matches', { body: {
-        team_home: home, team_away: away,
-        team_home_flag: homeFlag, team_away_flag: awayFlag,
-        stage: $('amStage').value || 'Group Stage',
-        handicap_team: S.hdcpTeam,
-        handicap_value: parseFloat($('amHdcpVal').value),
-        kickoff_time: ko.length === 16 ? ko + ':00' : ko,
-        multiplier: parseInt($('amMult').value, 10) || 1,
-      }});
-      toast('เพิ่มนัดแล้ว ✓');
-      if (ev.target && typeof ev.target.reset === 'function') ev.target.reset();
-      S.hdcpTeam = null;
-      ['amHomeFlag', 'amAwayFlag'].forEach((id) => { const el = $(id); if (el) delete el.dataset.touched; });
-      $('amStage').dataset.filled = '';
-      updateFlagPrev('home'); updateFlagPrev('away'); refreshHdcpSel();
+      await api('POST', '/matches', { body });
+      toast('เพิ่มนัดแล้ว');
+      $('addMatchForm').reset(); S.hdcpTeam = null;
       await reloadAll();
     } catch (e) { toast(e.detail || 'เพิ่มนัดไม่สำเร็จ', true); }
   }
 
-  // ── admin: display settings (home stat boxes / leaderboard tabs) ──
-  function renderAdminDisplaySettings() {
-    const host = $('displaySettings');
-    if (!host) return;
-    const chk = (group, key, label, checked) =>
-      `<label class="fin-chk" style="margin:4px 10px 4px 0">
-        <input type="checkbox" data-grp="${group}" value="${key}" ${checked ? 'checked' : ''}> ${label}
-      </label>`;
-    host.innerHTML = `
-      <div style="margin-bottom:10px">
-        <div class="faint" style="font-size:11.5px;margin-bottom:5px">กล่องคะแนนหน้าทายผล · Home stat boxes</div>
-        ${HOME_STAT_KEYS_ORDER.map((k) => chk('home_stats', k, HOME_STAT_LABELS[k], S.settings.home_stats.includes(k))).join('')}
-      </div>
-      <div style="margin-bottom:10px">
-        <div class="faint" style="font-size:11.5px;margin-bottom:5px">แท็บตารางคะแนน · Leaderboard tabs</div>
-        ${LB_TAB_KEYS_ORDER.map((k) => chk('lb_tabs', k, LB_TAB_LABELS[k], S.settings.lb_tabs.includes(k))).join('')}
-      </div>
-      <button class="btn btn-gold btn-sm" onclick="App.saveDisplaySettings()">💾 บันทึก</button>`;
-  }
-  async function saveDisplaySettings() {
-    const host = $('displaySettings');
-    const val = (grp) => Array.from(host.querySelectorAll(`input[data-grp="${grp}"]:checked`)).map((i) => i.value);
-    const lb_tabs = val('lb_tabs');
-    if (!lb_tabs.length) { toast('ต้องเลือกอย่างน้อย 1 แท็บตารางคะแนน', true); return; }
-    try {
-      const r = await api('PUT', '/admin/settings', { body: { home_stats: val('home_stats'), lb_tabs } });
-      S.settings = { home_stats: r.home_stats, lb_tabs: r.lb_tabs };
-      toast('บันทึกการแสดงผลแล้ว ✓');
-      renderMe(); renderLbTabs(); renderLeaderboard();
-    } catch (e) { toast(e.detail || 'บันทึกไม่สำเร็จ', true); }
-  }
-
-  // ── admin: champion prediction config ─────────────────────────────
-  function champTeamNames() { return ((S.champion && S.champion.teams) || []).map((t) => t.name); }
-  function renderChampAdmin() {
-    const host = $('champAdmin');
-    if (!host) return;
-    const c = S.champion || { deadline: '2026-07-09T23:59', points: 4, champion_team: null, teams: [], total_picked: 0, locked: false };
-    const dl = (c.deadline || '').slice(0, 16);
-    const teams = c.teams || [];
-    const opts = ['<option value="">— เลือกทีมแชมป์ —</option>'].concat(
-      teams.map((t) => `<option value="${esc(t.name)}" ${c.champion_team === t.name ? 'selected' : ''}>${esc(t.name)}</option>`)).join('');
-    const chips = teams.length
-      ? teams.map((t) => `<span class="team-chip">${flag(t.name, t.flag)} ${esc(t.name)}<button title="เอาออก" onclick="App.removeChampTeam(${JSON.stringify(t.name).replace(/"/g, '&quot;')})">✕</button></span>`).join('')
-      : `<span class="faint" style="font-size:12px">ยังไม่มีทีม — เพิ่มทีมด้านล่าง</span>`;
-    host.innerHTML = `
-      <div class="form-row">
-        <label class="fld">ทีมที่ให้ทายแชมป์ · Pickable teams (${teams.length})</label>
-        <div class="chip-pool">${chips}</div>
-        <div class="flagpick" style="margin-top:8px">
-          <input class="in" id="chAddTeam" list="teamNames" placeholder="พิมพ์ชื่อทีมจากทะเบียนแล้วกดเพิ่ม" autocomplete="off">
-          <button class="btn btn-ghost btn-sm" onclick="App.addChampTeam()">+ เพิ่มทีม</button>
-        </div>
-      </div>
-      <div class="form-2">
-        <div class="form-row"><label class="fld">ปิดรับ (เวลาไทย)</label><input class="in" id="chDl" type="datetime-local" value="${dl}"></div>
-        <div class="form-row"><label class="fld">คะแนนที่ได้</label><input class="in" id="chPts" type="number" step="0.5" min="0" value="${c.points}"></div>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <button class="btn btn-ghost btn-sm" onclick="App.saveChampCfg()">💾 บันทึกเวลา/คะแนน</button>
-        <select class="in in-mini" id="chWin" style="max-width:180px">${opts}</select>
-        <button class="btn btn-gold btn-sm" onclick="App.declareChampion()">👑 ประกาศแชมป์</button>
-        ${c.champion_team ? `<button class="btn btn-danger btn-sm" onclick="App.clearChampion()">ยกเลิกประกาศ</button>` : ''}
-      </div>
-      <div class="faint" style="font-size:11px;margin-top:8px">สถานะ: ${c.locked ? '🔒 ปิดรับแล้ว' : '✏️ เปิดรับอยู่'} · ทายแล้ว ${c.total_picked || 0} คน${c.champion_team ? ` · แชมป์: ${esc(c.champion_team)}` : ''}</div>`;
-  }
-  async function saveChampTeams(names, doneMsg) {
-    try {
-      const r = await api('PUT', '/admin/champion', { body: { teams: names } });
-      toast(r.removed ? `${doneMsg} · ล้างการทายที่ทีมถูกเอาออก ${r.removed} รายการ` : doneMsg);
-      await reloadAll();
-    } catch (e) { toast(e.detail || 'อัปเดตรายชื่อทีมไม่สำเร็จ', true); }
-  }
-  async function addChampTeam() {
-    const inp = $('chAddTeam');
-    const v = (inp.value || '').trim();
-    if (!v) { toast('พิมพ์ชื่อทีมก่อน', true); return; }
-    const names = champTeamNames();
-    if (names.includes(v)) { toast('ทีมนี้อยู่ในรายการแล้ว', true); return; }
-    inp.value = '';
-    await saveChampTeams(names.concat(v), `เพิ่ม ${v} แล้ว ✓`);
-  }
-  async function removeChampTeam(name) {
-    await saveChampTeams(champTeamNames().filter((n) => n !== name), `เอา ${name} ออกแล้ว`);
-  }
-  async function saveChampCfg() {
-    const deadline = $('chDl').value;
-    const points = parseFloat($('chPts').value);
-    if (!deadline || isNaN(points)) { toast('กรอกเวลาปิดรับและคะแนนให้ครบ', true); return; }
-    try {
-      await api('PUT', '/admin/champion', { body: { deadline, points } });
-      toast('บันทึกการตั้งค่าทายแชมป์แล้ว ✓');
-      await reloadAll();
-    } catch (e) { toast(e.detail || 'บันทึกไม่สำเร็จ', true); }
-  }
-  async function declareChampion() {
-    const team = $('chWin').value;
-    if (!team) { toast('เลือกทีมแชมป์ก่อน', true); return; }
-    try {
-      const r = await api('PUT', '/admin/champion', { body: { champion_team: team } });
-      toast(`ประกาศแชมป์ ${team} 👑 · แจกคะแนน ${r.awarded || 0} คน ✓`);
-      await reloadAll();
-    } catch (e) { toast(e.detail || 'ประกาศไม่สำเร็จ', true); }
-  }
-  async function clearChampion() {
-    try {
-      await api('PUT', '/admin/champion', { body: { champion_team: '' } });
-      toast('ยกเลิกประกาศแชมป์แล้ว · คะแนนโบนัสถูกถอนออก');
-      await reloadAll();
-    } catch (e) { toast(e.detail || 'ยกเลิกไม่สำเร็จ', true); }
-  }
-
   function renderAdmin() {
-    populateTeamDatalist();
-    refreshHdcpSel();
-    // display-settings UI removed (display is fixed) — renderAdminDisplaySettings()
-    // and saveDisplaySettings() are kept below for an easy future revert.
-    renderChampAdmin();
+    renderAdminDays();
+    renderAdminMatches();
     renderAdminUsers();
     renderAdminTeams();
     renderAdminLive();
-    const host = $('adminMatches');
-    const sorted = [...S.matches].sort((a, b) => {
-      const fa = a.status === 'finished', fb = b.status === 'finished';
-      if (fa !== fb) return fa ? 1 : -1;                          // upcoming first
-      return fa ? koDate(b.kickoff_time) - koDate(a.kickoff_time)  // finished: newest first
-               : koDate(a.kickoff_time) - koDate(b.kickoff_time);  // upcoming: soonest first
-    });
-    if (!sorted.length) { host.innerHTML = `<div class="empty"><div class="ico">⚽</div><div class="msg">ยังไม่มีนัด · No fixtures</div></div>`; return; }
-    host.innerHTML = sorted.map((m) => {
-      const st = matchState(m);
-      const fin = m.status === 'finished';
-      // button reflects the EFFECTIVE betting state, not just the raw locked flag —
-      // so re-opening works even after the cutoff / once the match is LIVE.
-      const bettingOpen = st === 'open';
-      const forced = !!m.force_open && bettingOpen;
-      const lockBtn = fin ? '' :
-        `<button class="btn btn-sm ${bettingOpen ? 'btn-ghost' : 'btn-gold'}" onclick="App.toggleLock(${m.id}, ${bettingOpen ? 1 : 0})" title="${bettingOpen ? 'ปิดรับทายทันที' : 'เปิดรับทายอีกครั้ง (ข้ามเวลา/LIVE)'}">${bettingOpen ? '🔒 ปิดรับ' : '🔓 เปิดรับ'}</button>${forced ? ' <span class="faint" style="font-size:10px">· เปิดโดยแอดมิน</span>' : ''}`;
-      return `<div class="admin-match">
-        <div class="am-top">
-          <span class="am-fixt">${stageBadge(m.stage)}${multBadge(m)} ${flag(m.team_home, m.team_home_flag)} ${esc(m.team_home)} <span class="faint">vs</span> ${esc(m.team_away)} ${flag(m.team_away, m.team_away_flag)}</span>
-          ${chip(st)}
-        </div>
-        <div class="faint" style="font-size:11px;margin-bottom:9px">🗓 ${fmtKO(m.kickoff_time)} · <span id="hdcp${m.id}">⚖️ ${esc(m.handicap_team)} ${m.handicap_value} <button class="lnk-edit" onclick="App.editHandicap(${m.id})" title="แก้ราคา handicap">✏️ แก้ราคา</button></span></div>
-        <div class="faint" style="font-size:11px;margin:-4px 0 9px"><span id="stg${m.id}">🏆 รอบ: ${esc(m.stage)} <button class="lnk-edit" onclick="App.editStage(${m.id})" title="แก้รอบการแข่งขัน">✏️ แก้รอบ</button></span></div>
-        <div class="faint" style="font-size:11px;margin:-4px 0 9px"><span id="mult${m.id}">✖️ ตัวคูณ: ×${(+m.multiplier || 1)} <button class="lnk-edit" onclick="App.editMult(${m.id})" title="แก้ตัวคูณคะแนน">✏️ แก้ตัวคูณ</button></span></div>
-        ${fin ? '' : `<div class="faint" style="font-size:11px;margin:-4px 0 9px">${apiMapHtml(m)}</div>`}
-        <div class="am-form">
-          <input class="in" id="rh${m.id}" type="number" min="0" placeholder="0" value="${fin ? m.score_home : ''}">
-          <span class="dash">–</span>
-          <input class="in" id="ra${m.id}" type="number" min="0" placeholder="0" value="${fin ? m.score_away : ''}">
-          <button class="btn btn-gold btn-sm" onclick="App.setResult(${m.id})">${fin ? 'แก้ผล' : 'บันทึกผล'}</button>
-          ${lockBtn}
-          <button class="btn btn-danger btn-sm" onclick="App.delMatch(${m.id})" title="ลบนัด">🗑</button>
-        </div>
-      </div>`;
-    }).join('');
+    const st = $('amStage');
+    if (st && !st.options.length) st.innerHTML = S.stages.map((s) => `<option>${esc(s)}</option>`).join('');
   }
 
-  // ── admin: users ──────────────────────────────────────────────────
-  function renderAdminUsers() {
-    const host = $('adminUsers');
-    if (!host) return;
-    api('GET', '/admin/users').then((list) => {
-      S.users = list;
-      host.innerHTML = list.map((u) => `
-        <div class="urow">
-          <div class="lb-av">${initials(u.display_name)}</div>
-          <div class="lb-info">
-            <div class="lb-nm">${esc(u.display_name)}${u.is_admin ? '<span class="you-tag" style="background:var(--gold)">ADMIN</span>' : ''}${!u.is_admin && !u.knockout_eligible ? '<span class="you-tag" style="background:var(--loss-bg);color:var(--loss)">ไม่ร่วมน็อคเอาท์</span>' : ''}</div>
-            <div class="lb-meta">@${esc(u.username)}</div>
-          </div>
-          <button class="btn btn-ghost btn-sm u-edit" onclick="App.editUser(${u.id}, ${JSON.stringify(u.display_name).replace(/"/g, '&quot;')}, ${JSON.stringify(u.username).replace(/"/g, '&quot;')}, ${u.knockout_eligible ? 1 : 0})">แก้</button>
-          ${u.is_admin ? '' : `<button class="btn btn-danger btn-sm" onclick="App.delUser(${u.id}, ${JSON.stringify(u.display_name).replace(/"/g, '&quot;')})" title="ลบผู้ใช้">🗑</button>`}
-        </div>`).join('');
-    }).catch(() => {});
+  function renderAdminDays() {
+    const el = $('adminDays');
+    if (!el) return;
+    el.innerHTML = S.days.length ? S.days.map((d) => `
+      <div class="urow">
+        <div class="lb-info">
+          <div class="lb-nm">${esc(fmtDay(d.play_date))}
+            <span class="chip ${DAY_CHIP[d.status]}">${DAY_WORD[d.status]}</span></div>
+          <div class="lb-meta">${d.matches} นัด · จบแล้ว ${d.finished}</div>
+        </div>
+        <div class="urow-act">
+          ${d.status !== 'open' ? `<button class="btn btn-gold btn-sm" onclick="App.setDayStatus('${d.play_date}','open')">เปิดรับ</button>` : ''}
+          ${d.status === 'open' ? `<button class="btn btn-danger btn-sm" onclick="App.setDayStatus('${d.play_date}','closed')">ปิดรับ</button>` : ''}
+        </div>
+      </div>`).join('') : '<div class="empty">ยังไม่มีวันแข่ง</div>';
   }
+
+  async function setDayStatus(day, status) {
+    try {
+      await api('PUT', '/admin/bet_days', { body: { play_date: day, status } });
+      toast(status === 'open' ? `เปิดรับพนัน ${fmtDay(day)}` : `ปิดรับ ${fmtDay(day)}`);
+      await reloadAll();
+    } catch (e) { toast(e.detail || 'ทำรายการไม่สำเร็จ', true); }
+  }
+
+  function renderAdminMatches() {
+    const el = $('adminMatches');
+    if (!el) return;
+    el.innerHTML = S.matches.length ? S.matches.map((m) => `
+      <div class="admin-match">
+        <div class="am-fixt">
+          <b>${flag(m.team_home, m.team_home_flag)} ${esc(m.team_home)} v ${flag(m.team_away, m.team_away_flag)} ${esc(m.team_away)}</b>
+          <div class="faint" style="font-size:10.5px">
+            ${esc(fmtKO(m.kickoff_time))} · ${hdcpLabel(m)} ·
+            น้ำ ${water(m.odds_home)} / ${water(m.odds_away)} ·
+            ${m.pool_bets} บิล ${money(m.pool_total)}
+            ${m.can_bet ? '<span class="chip chip-open">เปิด</span>' : `<span class="chip chip-soon">${esc(m.closed_reason || 'ปิด')}</span>`}
+          </div>
+        </div>
+        ${m.can_bet ? `
+          <div class="am-line">
+            <span class="am-lbl">ราคา</span>
+            <label class="am-fld"><i>เส้น</i><input class="in in-mini" id="hv-${m.id}" type="number" step="0.25" value="${m.handicap_value}"></label>
+            <label class="am-fld"><i>${esc(m.team_home).slice(0, 6)}</i><input class="in in-mini" id="oh-${m.id}" type="number" step="0.01" value="${m.odds_home}"></label>
+            <label class="am-fld"><i>${esc(m.team_away).slice(0, 6)}</i><input class="in in-mini" id="oa-${m.id}" type="number" step="0.01" value="${m.odds_away}"></label>
+            <button class="btn btn-ghost btn-sm" onclick="App.saveOdds(${m.id})">💾 บันทึกราคา</button>
+          </div>` : ''}
+        <div class="am-line">
+          <span class="am-lbl">ผล</span>
+          <label class="am-fld"><i>เหย้า</i><input class="in in-mini" id="sh-${m.id}" type="number" value="${m.score_home ?? ''}"></label>
+          <label class="am-fld"><i>เยือน</i><input class="in in-mini" id="sa-${m.id}" type="number" value="${m.score_away ?? ''}"></label>
+          <button class="btn btn-gold btn-sm" onclick="App.setResult(${m.id})">บันทึกผล</button>
+          <button class="btn btn-ghost btn-sm" onclick="App.toggleLock(${m.id}, ${m.locked ? 0 : 1})">${m.locked ? '🔓 เปิด' : '🔒 ปิด'}</button>
+          <button class="btn btn-danger btn-sm" onclick="App.delMatch(${m.id})">ลบ</button>
+        </div>
+      </div>`).join('') : '<div class="empty">ยังไม่มีนัด</div>';
+  }
+
+  async function saveOdds(id) {
+    const body = {
+      odds_home: parseFloat($('oh-' + id).value),
+      odds_away: parseFloat($('oa-' + id).value),
+      handicap_value: parseFloat($('hv-' + id).value),
+    };
+    try {
+      await api('PUT', `/matches/${id}/odds`, { body });
+      toast('อัปเดตราคาแล้ว · บิลเดิมยังใช้ราคาเก่า');
+      await reloadAll();
+    } catch (e) { toast(e.detail || 'อัปเดตราคาไม่สำเร็จ', true); }
+  }
+
+  async function setResult(id) {
+    const sh = parseInt($('sh-' + id).value, 10), sa = parseInt($('sa-' + id).value, 10);
+    if (isNaN(sh) || isNaN(sa)) return toast('ใส่สกอร์ให้ครบ', true);
+    if (!confirm('บันทึกผลและจ่ายเครดิตทุกบิลของนัดนี้?')) return;
+    try {
+      const r = await api('POST', '/admin/result', { body: { match_id: id, score_home: sh, score_away: sa } });
+      toast(`บันทึกผลแล้ว · คิดเงิน ${r.settled} บิล`);
+      await reloadAll();
+    } catch (e) { toast(e.detail || 'บันทึกผลไม่สำเร็จ', true); }
+  }
+
+  async function toggleLock(id, locked) {
+    try { await api('POST', '/admin/lock', { body: { match_id: id, locked } }); await reloadAll(); }
+    catch (e) { toast(e.detail || 'ทำรายการไม่สำเร็จ', true); }
+  }
+
+  async function delMatch(id) {
+    if (!confirm('ลบนัดนี้? บิลที่ยังไม่คิดผลจะถูกคืนเครดิต')) return;
+    try {
+      const r = await api('DELETE', '/matches/' + id);
+      toast(`ลบแล้ว · คืนเครดิต ${r.refunded} บิล`);
+      await reloadAll();
+    } catch (e) { toast(e.detail || 'ลบไม่สำเร็จ', true); }
+  }
+
+  function renderAdminUsers() {
+    const el = $('adminUsers');
+    if (!el) return;
+    el.innerHTML = S.users.map((u) => `
+      <div class="urow">
+        <div class="lb-av">${initials(u.display_name)}</div>
+        <div class="lb-info">
+          <div class="lb-nm">${esc(u.display_name)}${u.is_admin ? ' <span class="chip chip-open">แอดมิน</span>' : ''}</div>
+          <div class="lb-meta">@${esc(u.username)} · เครดิต <b>${money(u.credits)}</b>${u.open_bets ? ` · ค้าง ${u.open_bets} บิล` : ''}</div>
+        </div>
+        <div class="urow-act">
+          <input class="in in-mini" id="cr-${u.id}" type="number" placeholder="+/-" style="width:70px">
+          <button class="btn btn-gold btn-sm" onclick="App.giveCredits(${u.id})">เติม</button>
+          <button class="lnk-edit" onclick="App.editUser(${u.id})">แก้</button>
+          ${u.is_admin ? '' : `<button class="btn btn-danger btn-sm" onclick="App.delUser(${u.id})">ลบ</button>`}
+        </div>
+      </div>`).join('');
+  }
+
+  async function giveCredits(userId) {
+    const el = $('cr-' + userId);
+    const amount = Number(el && el.value);
+    if (!amount) return toast('ใส่จำนวน (ติดลบ = ดึงคืน)', true);
+    try {
+      const r = await api('POST', '/admin/credits', { body: { user_id: userId, amount } });
+      toast(`ปรับเครดิตแล้ว · คงเหลือ ${money(r.credits)}`);
+      await reloadAll();
+    } catch (e) { toast(e.detail || 'เติมเครดิตไม่สำเร็จ', true); }
+  }
+
   async function createUser(ev) {
     ev.preventDefault();
     try {
-      await api('POST', '/admin/users', { body: {
-        username: $('cuUser').value.trim(), display_name: $('cuName').value.trim(), password: $('cuPass').value,
-      }});
-      toast('สร้างผู้ใช้แล้ว ✓');
-      if (ev.target && ev.target.reset) ev.target.reset();
-      renderAdminUsers();
+      await api('POST', '/admin/users', {
+        body: {
+          username: $('cuUser').value.trim(), display_name: $('cuName').value.trim(),
+          password: $('cuPass').value, credits: parseFloat($('cuCredits').value) || 0,
+        },
+      });
+      toast('สร้างผู้ใช้แล้ว');
+      $('createUserForm').reset();
       await reloadAll();
-    } catch (e) { toast(e.detail || 'สร้างไม่สำเร็จ', true); }
+    } catch (e) { toast(e.detail || 'สร้างผู้ใช้ไม่สำเร็จ', true); }
   }
-  async function delUser(id, name) {
-    if (!confirm(`ลบผู้ใช้ "${name}" และการทายทั้งหมด?`)) return;
-    try { await api('DELETE', '/admin/users/' + id); toast('ลบผู้ใช้แล้ว'); renderAdminUsers(); await reloadAll(); }
+
+  async function delUser(id) {
+    if (!confirm('ลบผู้ใช้นี้และบิลทั้งหมด?')) return;
+    try { await api('DELETE', '/admin/users/' + id); toast('ลบแล้ว'); await reloadAll(); }
     catch (e) { toast(e.detail || 'ลบไม่สำเร็จ', true); }
   }
 
-  // ── profile / edit-user modal ─────────────────────────────────────
+  // profile / edit-user modal
+  let editingUser = null;
   function openProfile() {
-    S.editTarget = { self: true };
-    $('modalTitle').textContent = 'โปรไฟล์ของฉัน · My profile';
+    editingUser = null;
+    $('modalTitle').textContent = 'โปรไฟล์ของฉัน';
     $('pfName').value = S.me.display_name;
-    $('pfUserRow').style.display = '';
-    $('pfUser').value = S.me.username;
+    $('pfUserRow').style.display = 'none';
     $('pfPass').value = '';
-    $('pfKoRow').style.display = 'none';
-    $('modal').classList.add('open');
-    setTimeout(() => $('pfName').focus(), 60);
+    $('modal').classList.add('show');
   }
-  function editUser(id, name, username, koEligible) {
-    S.editTarget = { id };
-    $('modalTitle').textContent = 'แก้ไขผู้ใช้ · Edit user';
-    $('pfName').value = name;
+  function editUser(id) {
+    const u = S.users.find((x) => x.id === id);
+    if (!u) return;
+    editingUser = id;
+    $('modalTitle').textContent = 'แก้ไขผู้ใช้';
+    $('pfName').value = u.display_name;
+    $('pfUser').value = u.username;
     $('pfUserRow').style.display = '';
-    $('pfUser').value = username || '';
     $('pfPass').value = '';
-    $('pfKoRow').style.display = '';
-    setPfKo(!!koEligible);
-    $('modal').classList.add('open');
-    setTimeout(() => $('pfName').focus(), 60);
+    $('modal').classList.add('show');
   }
-  function setPfKo(on) {
-    S.pfKo = on;
-    $('pfKoSw').classList.toggle('on', on);
-    $('pfKoLabel').textContent = on ? 'อนุญาตให้ทาย' : 'ไม่อนุญาต';
-  }
-  function togglePfKnockout() { setPfKo(!S.pfKo); }
-  function closeModal() { $('modal').classList.remove('open'); }
+  function closeModal() { $('modal').classList.remove('show'); }
   function modalBg(ev) { if (ev.target.id === 'modal') closeModal(); }
 
   async function saveProfile(ev) {
     ev.preventDefault();
     const body = { display_name: $('pfName').value.trim() };
-    const pass = $('pfPass').value;
-    if (pass) body.password = pass;
+    if ($('pfPass').value) body.password = $('pfPass').value;
     try {
-      if (S.editTarget && S.editTarget.self) {
-        await api('POST', '/me/update', { body });
-        S.me.display_name = body.display_name;
-        $('topAvatar').textContent = initials(S.me.display_name);
-      } else {
-        body.knockout_eligible = !!S.pfKo;
-        await api('PUT', '/admin/users/' + S.editTarget.id, { body });
-      }
-      toast('บันทึกแล้ว ✓');
+      if (editingUser) await api('PUT', '/admin/users/' + editingUser, { body });
+      else await api('POST', '/me/update', { body });
+      toast('บันทึกแล้ว');
       closeModal();
-      renderAdminUsers();
       await reloadAll();
     } catch (e) { toast(e.detail || 'บันทึกไม่สำเร็จ', true); }
   }
 
-  // ── admin: teams registry ─────────────────────────────────────────
   function renderAdminTeams() {
-    const host = $('adminTeams');
-    if (!host) return;
-    host.innerHTML = (S.teams || []).map((t) => `
+    const el = $('adminTeams');
+    if (!el) return;
+    el.innerHTML = S.teams.map((t) => `
       <div class="trow">
-        <span class="t-prev">${window.flagHTML(t.name, t.flag)}</span>
+        <span class="t-prev">${flagPrevHTML(t.name, t.flag)}</span>
         <span class="t-name">${esc(t.name)}</span>
-        <button class="btn btn-ghost btn-sm" onclick="App.editTeam(${JSON.stringify(t.name).replace(/"/g, '&quot;')}, ${JSON.stringify(t.flag || '').replace(/"/g, '&quot;')})">แก้</button>
-        <button class="btn btn-danger btn-sm" onclick="App.delTeam(${t.id})">🗑</button>
+        <button class="lnk-edit" onclick="App.editTeam(${t.id})">แก้</button>
+        <button class="btn btn-danger btn-sm" onclick="App.delTeam(${t.id})">ลบ</button>
       </div>`).join('');
   }
-  function editTeam(name, flagUrl) {
-    $('tmName').value = name; $('tmFlag').value = flagUrl;
-    $('tmName').focus();
-    updateTeamPrev();
-  }
-  function updateTeamPrev() {
-    const prev = $('tmPrev');
-    if (prev) prev.innerHTML = flagPrevHTML($('tmFlag').value, $('tmName').value);
+  function editTeam(id) {
+    const t = S.teams.find((x) => x.id === id);
+    if (!t) return;
+    $('tmName').value = t.name; $('tmFlag').value = t.flag || ''; updateTeamPrev();
   }
   async function saveTeam(ev) {
     ev.preventDefault();
-    const name = $('tmName').value.trim();
-    if (!name) { toast('ใส่ชื่อทีม', true); return; }
     try {
-      await api('POST', '/teams', { body: { name, flag: $('tmFlag').value.trim() } });
-      toast('บันทึกทีมแล้ว ✓');
-      if (ev.target && ev.target.reset) ev.target.reset();
-      updateTeamPrev();
-      await reloadAll();
+      await api('POST', '/teams', { body: { name: $('tmName').value.trim(), flag: $('tmFlag').value.trim() } });
+      toast('บันทึกทีมแล้ว'); $('teamForm').reset(); updateTeamPrev(); await reloadAll();
     } catch (e) { toast(e.detail || 'บันทึกไม่สำเร็จ', true); }
   }
   async function delTeam(id) {
-    if (!confirm('ลบทีมนี้จากทะเบียน?')) return;
-    try { await api('DELETE', '/teams/' + id); toast('ลบทีมแล้ว'); await reloadAll(); }
+    if (!confirm('ลบทีมนี้?')) return;
+    try { await api('DELETE', '/teams/' + id); await reloadAll(); }
     catch (e) { toast(e.detail || 'ลบไม่สำเร็จ', true); }
   }
 
-  // ── admin: SQL console (editable results) ─────────────────────────
-  const EDITABLE_COLS = {
-    users: ['display_name', 'username', 'is_admin'],
-    teams: ['name', 'flag'],
-    matches: ['team_home', 'team_away', 'team_home_flag', 'team_away_flag', 'stage', 'handicap_team', 'handicap_value', 'kickoff_time', 'score_home', 'score_away', 'status', 'locked'],
-    predictions: ['predicted_winner', 'points'],
-  };
-  async function runQuery() {
-    const sql = $('sqlBox').value.trim();
-    const out = $('sqlOut');
-    if (!sql) { out.innerHTML = ''; return; }
-    try {
-      const r = await api('POST', '/admin/query', { body: { sql } });
-      if (!r.columns || !r.columns.length) { out.innerHTML = `<div class="sql-empty">— ไม่มีผลลัพธ์ —</div>`; return; }
-      // editable only when the query targets one whitelisted table and returns its id
-      const fm = sql.toLowerCase().match(/from\s+([a-z_]+)/);
-      const table = fm && EDITABLE_COLS[fm[1]] ? fm[1] : null;
-      const idIdx = r.columns.indexOf('id');
-      const editable = table && idIdx >= 0;
-      const head = r.columns.map((c) => `<th>${esc(c)}</th>`).join('');
-      const body = r.rows.map((row) => {
-        const id = row[idIdx];
-        return `<tr>${row.map((v, ci) => {
-          const col = r.columns[ci];
-          const canEdit = editable && col !== 'id' && EDITABLE_COLS[table].includes(col);
-          const val = v == null ? '' : v;
-          if (canEdit) return `<td class="ed" contenteditable="true" data-t="${table}" data-id="${id}" data-c="${esc(col)}" data-orig="${esc(val)}" onblur="App.saveCell(this)">${esc(val)}</td>`;
-          return `<td>${esc(v == null ? '∅' : v)}</td>`;
-        }).join('')}</tr>`;
-      }).join('');
-      const note = editable ? `<div class="sql-meta">${r.row_count} แถว · แก้ไขช่องที่ไฮไลต์ได้ (แตะแล้วพิมพ์)</div>` : `<div class="sql-meta">${r.row_count} แถว · rows</div>`;
-      out.innerHTML = note + `<div class="sql-scroll"><table class="sql-table ${editable ? 'editable' : ''}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
-    } catch (e) { out.innerHTML = `<div class="sql-err">⚠ ${esc(e.detail || 'query error')}</div>`; }
-  }
-  async function saveCell(td) {
-    const orig = td.dataset.orig;
-    const val = td.textContent.trim();
-    if (val === orig) return;
-    try {
-      await api('POST', '/admin/update_cell', { body: { table: td.dataset.t, id: parseInt(td.dataset.id, 10), column: td.dataset.c, value: val } });
-      td.dataset.orig = val;
-      td.classList.add('saved');
-      setTimeout(() => td.classList.remove('saved'), 900);
-      toast('บันทึกแล้ว ✓');
-      // refresh app state so edits reflect elsewhere (sql output stays as-is)
-      reloadAll();
-    } catch (e) { toast(e.detail || 'แก้ไขไม่สำเร็จ', true); td.textContent = orig; }
-  }
-  function sqlSample(q) { $('sqlBox').value = q; runQuery(); }
-
-  async function toggleLock(id, locked) {
-    try { await api('POST', '/admin/lock', { body: { match_id: id, locked } }); toast(locked ? 'ปิดรับการทายแล้ว 🔒' : 'เปิดรับการทายอีกครั้ง 🔓'); await reloadAll(); }
-    catch (e) { toast(e.detail || 'ทำรายการไม่สำเร็จ', true); }
-  }
-
-  // ── admin: live in-progress scores (one batch call) ───────────────
-  function liveMatches() {
-    const now = Date.now();
-    return S.matches
-      .filter((m) => m.status !== 'finished' && now >= koDate(m.kickoff_time).getTime())
-      .sort((a, b) => koDate(a.kickoff_time) - koDate(b.kickoff_time));
-  }
+  // live scores / provider mapping
+  function liveMatches() { return S.matches.filter((m) => m.status !== 'finished'); }
   function renderAdminLive() {
-    const host = $('liveScores');
-    if (!host) return;
-    const live = liveMatches();
-    if (!live.length) {
-      host.innerHTML = `<div class="faint" style="font-size:12px">ยังไม่มีแมตช์ที่กำลังแข่งขัน · no match in play</div>`;
-      return;
-    }
-    host.innerHTML = live.map((m) => {
-      const ph = livePhase(m);
-      const sh = m.score_home == null ? '' : m.score_home;
-      const sa = m.score_away == null ? '' : m.score_away;
-      return `<div class="admin-match">
-        <div class="am-top">
-          <span class="am-fixt">${flag(m.team_home, m.team_home_flag)} ${esc(m.team_home)} <span class="faint">vs</span> ${esc(m.team_away)} ${flag(m.team_away, m.team_away_flag)}</span>
-          <span class="chip chip-live">${ph.label} · ${ph.e}'</span>
+    const el = $('liveScores');
+    if (!el) return;
+    const ms = liveMatches();
+    el.innerHTML = ms.length ? ms.map((m) => `
+      <div class="urow">
+        <div class="lb-info">
+          <div class="lb-nm">${esc(m.team_home)} v ${esc(m.team_away)}</div>
+          <div class="lb-meta">${esc(fmtKO(m.kickoff_time))}
+            ${m.apifootball_fixture_id ? ` · ผูก event #${m.apifootball_fixture_id}` : ' · ยังไม่ผูก event'}</div>
         </div>
-        <div class="am-form">
-          <input class="in" id="lh${m.id}" type="number" min="0" placeholder="0" value="${sh}">
-          <span class="dash">–</span>
-          <input class="in" id="la${m.id}" type="number" min="0" placeholder="0" value="${sa}">
-          <label class="fin-chk"><input type="checkbox" id="lf${m.id}" ${ph.e >= 135 ? 'checked' : ''}> จบเกม</label>
-        </div>
-      </div>`;
-    }).join('') +
-      `<button class="btn btn-gold btn-block" onclick="App.saveLiveScores()" style="margin-top:6px">💾 บันทึกสกอร์สดทั้งหมด · update all (1 call)</button>`;
+        <div class="urow-act">${apiMapHtml(m)}</div>
+      </div>`).join('') : '<div class="empty">ไม่มีนัดที่รอผล</div>';
   }
-  // ── admin: manual mapping to API-Football fixtures (WC2026) ───────
   function apiMapHtml(m) {
-    const mapped = m.apifootball_fixture_id;
-    if (!S.apiFixtures.length) {
-      return mapped
-        ? `🔗 ผูกกับ API แล้ว (fixture #${mapped}) · <button class="lnk-edit" onclick="App.loadApiFixtures()">โหลดรายชื่อเพื่อเปลี่ยน</button>`
-        : `🔗 <button class="lnk-edit" onclick="App.loadApiFixtures()">โหลดรายชื่อนัดจาก API-Football เพื่อผูก</button>`;
-    }
-    const opt = (v, label, sel) => `<option value="${v}" ${sel ? 'selected' : ''}>${esc(label)}</option>`;
-    const opts = [opt('', '— ยังไม่ผูก —', !mapped)].concat(
-      S.apiFixtures.map((f) => opt(f.fixture_id, `${f.date} · ${f.home} vs ${f.away}`, f.fixture_id === mapped)));
-    return `🔗 ผูก API: <select class="in in-mini" style="max-width:240px" onchange="App.mapFixture(${m.id}, this.value)">${opts.join('')}</select>`;
+    if (!S.apiFixtures.length) return '';
+    return `<select class="in in-mini" onchange="App.mapFixture(${m.id}, this.value)">
+        <option value="">— เลือก event —</option>
+        ${S.apiFixtures.map((f) => `<option value="${f.fixture_id}" ${f.fixture_id === m.apifootball_fixture_id ? 'selected' : ''}>
+          ${esc(f.date)} ${esc(f.home)} v ${esc(f.away)}</option>`).join('')}
+      </select>`;
   }
   async function loadApiFixtures() {
     try {
       const r = await api('GET', '/admin/apifootball/fixtures');
       S.apiFixtures = r.fixtures || [];
-      if (!S.apiFixtures.length) toast(r.note || `ยังไม่พบรายการนัด (${r.provider || 'provider'})`, true);
-      else toast(`โหลด ${S.apiFixtures.length} นัดจาก ${r.provider || 'API'} แล้ว — เลือกผูกแต่ละนัดได้เลย ✓`);
-      renderAdmin();
-    } catch (e) { toast(e.detail || 'โหลดรายชื่อจาก API ไม่สำเร็จ', true); }
+      toast(r.note || `พบ ${r.count} นัด`);
+      renderAdminLive();
+    } catch (e) { toast(e.detail || 'โหลดไม่สำเร็จ', true); }
   }
-  async function mapFixture(matchId, val) {
-    const fid = val === '' ? null : parseInt(val, 10);
+  async function mapFixture(matchId, fixtureId) {
     try {
-      await api('POST', '/admin/apifootball/map', { body: { match_id: matchId, fixture_id: fid } });
-      const m = S.matches.find((x) => x.id === matchId);
-      if (m) m.apifootball_fixture_id = fid;
-      toast(fid ? 'ผูก fixture แล้ว ✓ ระบบจะดึงสกอร์อัตโนมัติเมื่อเริ่มแข่ง' : 'ยกเลิกการผูกแล้ว');
-    } catch (e) { toast(e.detail || 'ผูก fixture ไม่สำเร็จ', true); renderAdmin(); }
+      await api('POST', '/admin/apifootball/map', { body: { match_id: matchId, fixture_id: fixtureId ? Number(fixtureId) : null } });
+      toast('ผูก event แล้ว'); await reloadAll();
+    } catch (e) { toast(e.detail || 'ผูกไม่สำเร็จ', true); }
   }
-
   async function fetchScores() {
     try {
       const r = await api('GET', '/admin/fetch_scores');
-      let filled = 0;
-      (r.matched || []).forEach((x) => {
-        const lh = $('lh' + x.match_id), la = $('la' + x.match_id), lf = $('lf' + x.match_id);
-        if (lh && la) { lh.value = x.score_home; la.value = x.score_away; if (lf) lf.checked = !!x.final; filled++; }
-      });
-      if (filled) toast(`ดึงสกอร์แล้ว · เติม ${filled} แมตช์ — ตรวจแล้วกดบันทึก ✓`);
-      else if (r.note) toast(r.note, true);
-      else toast(`ดึงข้อมูลแล้ว แต่ยังไม่มีนัดที่ผูกไว้กำลังแข่งอยู่`, true);
+      if (!r.matched || !r.matched.length) return toast(r.note || 'ยังไม่มีสกอร์ใหม่');
+      if (!confirm(`พบสกอร์ ${r.matched.length} นัด — บันทึกและคิดเงิน?`)) return;
+      const res = await api('POST', '/admin/results_batch', { body: { results: r.matched } });
+      toast(`อัปเดต ${res.matches} นัด`);
+      await reloadAll();
     } catch (e) { toast(e.detail || 'ดึงสกอร์ไม่สำเร็จ', true); }
   }
 
-  async function saveLiveScores() {
-    const results = [];
-    for (const m of liveMatches()) {
-      const h = $('lh' + m.id).value, a = $('la' + m.id).value;
-      if (h === '' || a === '') continue;
-      results.push({ match_id: m.id, score_home: parseInt(h, 10), score_away: parseInt(a, 10), final: $('lf' + m.id).checked });
+  // SQL console
+  function sqlSample(s) { $('sqlBox').value = s; }
+  async function runQuery() {
+    const out = $('sqlOut');
+    try {
+      const r = await api('POST', '/admin/query', { body: { sql: $('sqlBox').value } });
+      if (!r.rows.length) { out.innerHTML = '<div class="sql-empty">ไม่มีข้อมูล</div>'; return; }
+      out.innerHTML = `<div class="sql-meta">${r.row_count} แถว</div>
+        <div class="sql-scroll"><table class="sql-table">
+          <thead><tr>${r.columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+          <tbody>${r.rows.map((row) => `<tr>${row.map((v) => `<td>${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody>
+        </table></div>`;
+    } catch (e) {
+      out.innerHTML = `<div class="sql-err">${esc(e.detail || 'error')}</div>`;
     }
-    if (!results.length) { toast('ยังไม่มีสกอร์ให้บันทึก', true); return; }
-    try {
-      const r = await api('POST', '/admin/results_batch', { body: { results } });
-      toast(`อัปเดต ${r.matches || 0} แมตช์ · คิดคะแนนแล้ว ✓`);
-      await reloadAll();
-    } catch (e) { toast(e.detail || 'บันทึกสกอร์ไม่สำเร็จ', true); }
   }
 
-  // ── admin: edit handicap line anytime ─────────────────────────────
-  function editHandicap(id) {
-    const m = S.matches.find((x) => x.id === id);
-    if (!m) return;
-    const box = $('hdcp' + id);
-    if (!box) return;
-    const opt = (t) => `<option value="${esc(t)}" ${m.handicap_team === t ? 'selected' : ''}>${esc(t)}</option>`;
-    box.innerHTML = `⚖️
-      <select class="in in-mini" id="eht${id}">${opt(m.team_home)}${opt(m.team_away)}</select>
-      <input class="in in-mini" id="ehv${id}" type="number" step="0.25" min="0" value="${m.handicap_value}" style="width:62px">
-      <button class="btn btn-gold btn-sm" onclick="App.saveHandicap(${id})">✓</button>
-      <button class="btn btn-ghost btn-sm" onclick="App.renderAdmin()">✕</button>`;
-  }
-  async function saveHandicap(id) {
-    const ht = $('eht' + id).value;
-    const hv = parseFloat($('ehv' + id).value);
-    if (isNaN(hv)) { toast('กรอกราคาให้ถูกต้อง', true); return; }
-    try {
-      const r = await api('PUT', '/matches/' + id, { body: { handicap_team: ht, handicap_value: hv } });
-      toast(r.recomputed ? `อัปเดตราคา · คิดคะแนนใหม่ ${r.recomputed} รายการ ✓` : 'อัปเดตราคาแล้ว ✓');
-      await reloadAll();
-    } catch (e) { toast(e.detail || 'อัปเดตราคาไม่สำเร็จ', true); }
-  }
-
-  // ── admin: fix a match's stage/round anytime (predictions kept) ────
-  function editStage(id) {
-    const m = S.matches.find((x) => x.id === id);
-    if (!m) return;
-    const box = $('stg' + id);
-    if (!box) return;
-    const opts = (S.stages || []).map((s) => `<option value="${esc(s)}" ${m.stage === s ? 'selected' : ''}>${esc(s)}</option>`).join('');
-    box.innerHTML = `🏆 รอบ:
-      <select class="in in-mini" id="est${id}" style="max-width:190px">${opts}</select>
-      <button class="btn btn-gold btn-sm" onclick="App.saveStage(${id})">✓</button>
-      <button class="btn btn-ghost btn-sm" onclick="App.renderAdmin()">✕</button>`;
-  }
-  async function saveStage(id) {
-    const stage = $('est' + id).value;
-    try {
-      // only the stage field changes; every user's prediction row is untouched
-      // (points are unaffected by stage — the leaderboard just re-buckets it into
-      // the correct Group/Knockout board)
-      await api('PUT', '/matches/' + id, { body: { stage } });
-      toast('อัปเดตรอบแล้ว · การทายทุกคนยังอยู่ครบ ✓');
-      await reloadAll();
-    } catch (e) { toast(e.detail || 'อัปเดตรอบไม่สำเร็จ', true); }
-  }
-
-  // ── admin: edit the point multiplier (recomputes if already scored) ─
-  function editMult(id) {
-    const m = S.matches.find((x) => x.id === id);
-    if (!m) return;
-    const box = $('mult' + id);
-    if (!box) return;
-    const cur = +m.multiplier || 1;
-    const opt = (v) => `<option value="${v}" ${cur === v ? 'selected' : ''}>×${v}</option>`;
-    box.innerHTML = `✖️ ตัวคูณ:
-      <select class="in in-mini" id="emu${id}">${opt(1)}${opt(2)}${opt(4)}</select>
-      <button class="btn btn-gold btn-sm" onclick="App.saveMult(${id})">✓</button>
-      <button class="btn btn-ghost btn-sm" onclick="App.renderAdmin()">✕</button>`;
-  }
-  async function saveMult(id) {
-    const multiplier = parseInt($('emu' + id).value, 10) || 1;
-    try {
-      const r = await api('PUT', '/matches/' + id, { body: { multiplier } });
-      toast(r.recomputed ? `อัปเดตตัวคูณ ×${multiplier} · คิดคะแนนใหม่ ${r.recomputed} รายการ ✓` : `อัปเดตตัวคูณ ×${multiplier} แล้ว ✓`);
-      await reloadAll();
-    } catch (e) { toast(e.detail || 'อัปเดตตัวคูณไม่สำเร็จ', true); }
-  }
-
-  async function setResult(id) {
-    const h = $('rh' + id).value, a = $('ra' + id).value;
-    if (h === '' || a === '') { toast('กรอกสกอร์ให้ครบ', true); return; }
-    try {
-      const r = await api('POST', '/admin/result', { body: { match_id: id, score_home: parseInt(h, 10), score_away: parseInt(a, 10) } });
-      toast(`บันทึกผลแล้ว · คำนวณ ${r.updated || 0} รายการ ✓`);
-      await reloadAll();
-    } catch (e) { toast(e.detail || 'บันทึกผลไม่สำเร็จ', true); }
-  }
-  async function delMatch(id) {
-    if (!confirm('ลบนัดนี้และการทายทั้งหมด?')) return;
-    try { await api('DELETE', '/matches/' + id); toast('ลบนัดแล้ว'); await reloadAll(); }
-    catch (e) { toast(e.detail || 'ลบไม่สำเร็จ', true); }
-  }
-
-  // ════════════════════════════════════════════════════════════════
-  //  NAV
-  // ════════════════════════════════════════════════════════════════
+  // ── nav ──────────────────────────────────────────────────────────
   function go(view) {
     S.view = view;
-    if (view === 'results' && S.resultsDirty) renderResults();
     document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + view));
     document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === view));
     $('scroll').scrollTop = 0;
   }
 
-  // ── init ─────────────────────────────────────────────────────────
   async function init() {
-    const saved = localStorage.getItem(LS);
-    if (saved) { S.token = saved; try { await boot(); return; } catch (e) {} }
-    // probe: a JSON response from /me means a real backend is up
-    try {
-      const res = await fetch('/me');
-      const ct = (res.headers.get('content-type') || '').toLowerCase();
-      if (!ct.includes('application/json')) enterDemo();
-    } catch (e) { enterDemo(); }
+    S.token = localStorage.getItem(LS);
+    if (S.token) await boot();
+    else {
+      // probe the backend so demo mode is detected before the first login
+      try { await api('GET', '/settings'); } catch (e) { /* 401 = real backend */ }
+      $('authScreen').style.display = 'flex';
+    }
   }
 
   window.App = {
-    doLogin, logout,
-    go, predict, addMatch, setResult, delMatch, setHdcp, refreshHdcpSel,
-    onTeamInput, onFlagInput, toggleLock,
-    saveLiveScores, fetchScores, loadApiFixtures, mapFixture, editHandicap, saveHandicap, editStage, saveStage, editMult, saveMult, renderAdmin,
-    pickChampion, saveChampCfg, declareChampion, clearChampion, addChampTeam, removeChampTeam,
-    saveDisplaySettings,
-    createUser, delUser, editUser, saveTeam, delTeam, editTeam, updateTeamPrev,
-    openProfile, closeModal, modalBg, saveProfile, togglePfKnockout,
-    runQuery, sqlSample, saveCell,
-    setLbPhase,
-    _state: S,
+    doLogin, logout, go, openProfile, closeModal, modalBg, saveProfile, editUser,
+    setDay, pick, setStake, previewStake, placeBet, cancelBet,
+    addMatch, saveOdds, setResult, toggleLock, delMatch, setDayStatus,
+    createUser, delUser, giveCredits,
+    saveTeam, editTeam, delTeam, updateTeamPrev, onTeamInput, onFlagInput, setHdcp,
+    loadApiFixtures, mapFixture, fetchScores, sqlSample, runQuery,
+    reloadAll,
   };
+
   document.addEventListener('DOMContentLoaded', init);
 })();
