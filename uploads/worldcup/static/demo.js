@@ -37,10 +37,13 @@
   }
 
   // ── team registry (ASEAN Championship) ─────────────────────────────
+  // The 10 finalists. Brunei lost the play-off to Timor-Leste 6-1 on aggregate,
+  // so it is not in the tournament — keep this in step with TEAM_SEED in main.py.
   const TEAM_SEED = [
-    ['Thailand', 'th'], ['Vietnam', 'vn'], ['Indonesia', 'id'], ['Malaysia', 'my'],
-    ['Singapore', 'sg'], ['Philippines', 'ph'], ['Myanmar', 'mm'], ['Cambodia', 'kh'],
-    ['Laos', 'la'], ['Timor-Leste', 'tl'], ['Brunei', 'bn'],
+    ['Vietnam', 'vn'], ['Indonesia', 'id'], ['Singapore', 'sg'],        // Group A
+    ['Cambodia', 'kh'], ['Timor-Leste', 'tl'],
+    ['Thailand', 'th'], ['Malaysia', 'my'], ['Philippines', 'ph'],      // Group B
+    ['Myanmar', 'mm'], ['Laos', 'la'],
   ];
   const flagUrl = (iso) => (window.__resources && window.__resources['flag_' + iso]) || `https://flagcdn.com/w80/${iso}.png`;
   let tid = 1;

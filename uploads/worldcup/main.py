@@ -38,12 +38,23 @@ BET_CUTOFF_MIN = int(os.environ.get("BET_CUTOFF_MIN", "10"))
 # registry are deliberately preserved — delete those from the admin screen.
 SCHEMA_VERSION = "v2-credits"
 
-# ASEAN Championship 2026 (ASEAN Hyundai Cup) — the 10 participating nations.
+# ASEAN Championship 2026 (ASEAN Hyundai Cup) — the 10 nations in the finals.
+# Brunei is deliberately absent: Timor-Leste took the last berth 6-1 on
+# aggregate in the June play-off. Codes are ISO 3166-1 alpha-2, which is what
+# flagcdn keys its images on.
 TEAM_SEED = [
-    ("Thailand", "th"), ("Vietnam", "vn"), ("Indonesia", "id"), ("Malaysia", "my"),
-    ("Singapore", "sg"), ("Philippines", "ph"), ("Myanmar", "mm"), ("Cambodia", "kh"),
-    ("Laos", "la"), ("Timor-Leste", "tl"), ("Brunei", "bn"),
+    # Group A
+    ("Vietnam", "vn"), ("Indonesia", "id"), ("Singapore", "sg"),
+    ("Cambodia", "kh"), ("Timor-Leste", "tl"),
+    # Group B
+    ("Thailand", "th"), ("Malaysia", "my"), ("Philippines", "ph"),
+    ("Myanmar", "mm"), ("Laos", "la"),
 ]
+
+# Bumping this swaps the team registry over to TEAM_SEED once, archiving
+# whatever was there before. Separate from SCHEMA_VERSION so the roster can be
+# corrected on a database that has already been through the changeover.
+TEAMS_VERSION = "asean-2026"
 def flag_url(iso): return f"https://flagcdn.com/w80/{iso}.png"
 
 # ─── Database ────────────────────────────────────────────────
@@ -216,10 +227,23 @@ def init_db():
         print(f"[init] switched to {SCHEMA_VERSION}; users & teams kept; "
               f"old data archived in {kept or 'nothing (fresh db)'}", flush=True)
 
-    # seed the team registry
-    if not c.execute("SELECT id FROM teams LIMIT 1").fetchone():
+    # Point the team registry at the current tournament. Seeding only when the
+    # table was empty left a database carried over from a previous event with
+    # the OLD roster and none of the new nations, so this runs off its own
+    # version marker instead. The previous list is archived, not dropped.
+    trow = c.execute("SELECT value FROM settings WHERE key='teams_version'").fetchone()
+    if not trow or trow["value"] != TEAMS_VERSION:
+        had = c.execute("SELECT COUNT(*) AS n FROM teams").fetchone()["n"]
+        if had and not c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='teams_v1'").fetchone():
+            c.execute("CREATE TABLE teams_v1 AS SELECT * FROM teams")
+        c.execute("DELETE FROM teams")
         for name, iso in TEAM_SEED:
             c.execute("INSERT OR IGNORE INTO teams (name, flag) VALUES (?,?)", (name, flag_url(iso)))
+        c.execute("INSERT INTO settings (key, value) VALUES ('teams_version', ?) "
+                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (TEAMS_VERSION,))
+        print(f"[init] team registry set to {TEAMS_VERSION} "
+              f"({len(TEAM_SEED)} teams; {had} previous archived in teams_v1)", flush=True)
 
     # backfill play_date for any match that predates the column
     for m in c.execute("SELECT id, kickoff_time FROM matches WHERE play_date IS NULL").fetchall():
