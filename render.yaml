@@ -11,6 +11,12 @@ services:
         value: "1"
       - key: DATA_DIR
         value: /var/data
+      # Which competition the free ESPN scoreboard is polled for.
+      # aff.championship = ASEAN Championship (ASEAN Hyundai Cup 2026).
+      # Declared here rather than left to the code default so a stale
+      # dashboard value from the World Cup can't silently win.
+      - key: ESPN_LEAGUE
+        value: aff.championship
     disk:
       name: worldcup-data
       mountPath: /var/data
