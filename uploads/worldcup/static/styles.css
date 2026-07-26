@@ -407,7 +407,15 @@ input.in::placeholder{color:var(--faint)}
 .fin-chk{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--ink);cursor:pointer;user-select:none}
 .fin-chk input{width:auto;margin:0}
 /* inline "edit handicap" affordance on admin match cards */
-.lnk-edit{background:none;border:none;color:var(--gold,#c8a24a);font:inherit;font-size:11px;cursor:pointer;padding:0 2px;text-decoration:underline}
+/* Text-link affordance, but sized as a real touch target. At 11px with 2px of
+   padding this was ~17x16 CSS px — smaller than a fingertip can reliably hit,
+   so it read as a dead control next to the proper buttons beside it. */
+.lnk-edit{
+  background:none;border:none;color:var(--gold,#c8a24a);font:inherit;font-size:12.5px;
+  cursor:pointer;padding:8px 10px;text-decoration:underline;min-height:36px;
+  display:inline-flex;align-items:center;border-radius:9px;
+}
+.lnk-edit:hover{background:color-mix(in srgb,var(--gold) 14%,transparent);text-decoration:none}
 .in-mini{width:auto;display:inline-block;padding:4px 6px;font-size:12px;vertical-align:middle}
 /* LIVE flag under the score on a match card */
 .live-tag{font-size:10px;font-weight:800;letter-spacing:.5px;color:var(--loss);margin-top:2px}
@@ -689,6 +697,15 @@ input.in::placeholder{color:var(--faint)}
 .am-fld{display:flex;flex-direction:column;gap:2px}
 .am-fld i{font-style:normal;font-size:9.5px;color:var(--faint);padding-left:2px}
 .am-fld .in-mini{width:66px;text-align:center;font-variant-numeric:tabular-nums}
+
+/* why a priced-up fixture still isn't bettable, with the fix one tap away */
+.am-nudge{
+  margin-top:8px;padding:9px 11px;border-radius:11px;font-size:11.5px;color:var(--dim);
+  background:color-mix(in srgb,var(--gold) 9%,rgba(6,34,63,.5));
+  border:1px dashed color-mix(in srgb,var(--gold) 34%,transparent);
+  display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+}
+.am-nudge .btn{margin-left:auto}
 
 /* matchday tabs scroll horizontally once a tournament gets long */
 #dayTabs{overflow-x:auto;scrollbar-width:none}

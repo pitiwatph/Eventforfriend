@@ -486,8 +486,21 @@ def bet_gate(conn, match: dict):
     return None
 
 def odds_frozen(conn, match: dict) -> bool:
-    """Odds stop moving at exactly the same moment betting closes."""
-    return bet_gate(conn, match) is not None
+    """Whether the price is still movable.
+
+    Deliberately NOT the same test as bet_gate: pricing a fixture is what the
+    admin does *before* opening its matchday, so the day switch must not block
+    it. Only the clock and the match's own state freeze a price — which is the
+    moment punters stop being able to react to a change anyway.
+    """
+    if match["status"] != "upcoming":
+        return True
+    if match.get("force_open"):
+        return False
+    ko = _ko_bkk(match["kickoff_time"])
+    if ko is None:
+        return True
+    return _now_bkk() >= ko - timedelta(minutes=BET_CUTOFF_MIN)
 
 # ─── Settlement ──────────────────────────────────────────────
 def settle_match(conn, match: dict, score_home: int, score_away: int, final: bool) -> dict:
@@ -736,6 +749,7 @@ def _decorate(conn, rows) -> list:
         pool = pools.get(m["id"])
         m["can_bet"] = reason is None
         m["closed_reason"] = reason
+        m["can_edit_odds"] = not odds_frozen(conn, m)
         m["day_status"] = day_status(conn, m.get("play_date") or "")
         m["pool_bets"] = pool["n"] if pool else 0
         m["pool_total"] = round(float(pool["total"]), 2) if pool else 0.0
@@ -963,14 +977,33 @@ def set_results_batch(body: BatchResultIn, user=Depends(require_admin)):
 
 @app.post("/admin/lock")
 def lock_match(body: LockIn, user=Depends(require_admin)):
+    """Close or reopen a single fixture.
+
+    Reopening only clears the manual lock; the matchday switch still governs.
+    It escalates to force_open — the override that ignores every gate — solely
+    when the kickoff cutoff has already passed, since that is the one case
+    where clearing the lock alone could not reopen anything. Reopening a
+    fixture must never quietly switch on a day the admin has not opened.
+    """
     conn = get_db()
+    row = conn.execute("SELECT * FROM matches WHERE id=?", (body.match_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="ไม่พบนัด")
+    m = dict(row)
     if body.locked:
         conn.execute("UPDATE matches SET locked=1, force_open=0 WHERE id=?", (body.match_id,))
+        forced = False
     else:
-        conn.execute("UPDATE matches SET locked=0, force_open=1 WHERE id=?", (body.match_id,))
+        ko = _ko_bkk(m["kickoff_time"])
+        past_cutoff = ko is None or _now_bkk() >= ko - timedelta(minutes=BET_CUTOFF_MIN)
+        forced = bool(past_cutoff or m["status"] != "upcoming")
+        conn.execute("UPDATE matches SET locked=0, force_open=? WHERE id=?",
+                     (1 if forced else 0, body.match_id))
     conn.commit()
+    day = day_status(conn, m.get("play_date") or "")
     conn.close()
-    return {"ok": True}
+    return {"ok": True, "forced": forced, "day_status": day}
 
 # ─── Live scores (free provider, default = ESPN) ─────────────
 # The admin maps each of our matches to a provider event id (no name guessing).

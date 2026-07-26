@@ -645,8 +645,13 @@
             ${m.pool_bets} บิล ${money(m.pool_total)}
             ${m.can_bet ? '<span class="chip chip-open">เปิด</span>' : `<span class="chip chip-soon">${esc(m.closed_reason || 'ปิด')}</span>`}
           </div>
+          ${!m.can_bet && m.day_status !== 'open' && m.status === 'upcoming' ? `
+            <div class="am-nudge">
+              วันนี้ยังไม่เปิดรับ ผู้เล่นจึงยังแทงไม่ได้
+              <button class="btn btn-gold btn-sm" onclick="App.setDayStatus('${m.play_date}','open')">เปิดวัน ${esc(fmtDay(m.play_date))}</button>
+            </div>` : ''}
         </div>
-        ${m.can_bet ? `
+        ${m.can_edit_odds ? `
           <div class="am-line">
             <span class="am-lbl">ราคา</span>
             <label class="am-fld"><i>เส้น</i><input class="in in-mini" id="hv-${m.id}" type="number" step="0.25" value="${m.handicap_value}"></label>
@@ -716,7 +721,7 @@
         <div class="urow-act">
           <input class="in in-mini" id="cr-${u.id}" type="number" placeholder="+/-" style="width:70px">
           <button class="btn btn-gold btn-sm" onclick="App.giveCredits(${u.id})">เติม</button>
-          <button class="lnk-edit" onclick="App.editUser(${u.id})">แก้</button>
+          <button class="btn btn-ghost btn-sm" onclick="App.editUser(${u.id})">แก้ไข</button>
           ${u.is_admin ? '' : `<button class="btn btn-danger btn-sm" onclick="App.delUser(${u.id})">ลบ</button>`}
         </div>
       </div>`).join('');
@@ -798,7 +803,7 @@
       <div class="trow">
         <span class="t-prev">${flagPrevHTML(t.name, t.flag)}</span>
         <span class="t-name">${esc(t.name)}</span>
-        <button class="lnk-edit" onclick="App.editTeam(${t.id})">แก้</button>
+        <button class="btn btn-ghost btn-sm" onclick="App.editTeam(${t.id})">แก้ไข</button>
         <button class="btn btn-danger btn-sm" onclick="App.delTeam(${t.id})">ลบ</button>
       </div>`).join('');
   }

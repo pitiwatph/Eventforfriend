@@ -166,11 +166,22 @@
     return null;
   }
 
+  // Pricing is gated by the clock only, never by the matchday switch — the
+  // admin prices a fixture before opening the day it sits on.
+  function oddsFrozen(m) {
+    if (m.status !== 'upcoming') return true;
+    if (m.force_open) return false;
+    const ko = new Date(m.kickoff_time).getTime();
+    if (isNaN(ko)) return true;
+    return Date.now() >= ko - CUTOFF_MIN * MIN;
+  }
+
   function decorate(m) {
     const pool = bets.filter((b) => b.match_id === m.id && b.status !== 'void');
     const reason = betGate(m);
     return {
       ...m, can_bet: reason === null, closed_reason: reason,
+      can_edit_odds: !oddsFrozen(m),
       day_status: dayStatus(m.play_date),
       pool_bets: pool.length, pool_total: r2(pool.reduce((s, b) => s + b.stake, 0)),
     };
@@ -346,7 +357,7 @@
     if (path.startsWith('/matches/') && path.endsWith('/odds') && method === 'PUT') {
       const m = matches.find((x) => x.id === +path.split('/')[2]);
       if (!m) return err(404, 'ไม่พบนัด');
-      if (betGate(m)) return err(400, 'ปิดรับพนันแล้ว — แก้ราคาไม่ได้');
+      if (oddsFrozen(m)) return err(400, 'ปิดรับพนันแล้ว — แก้ราคาไม่ได้');
       if (body.handicap_team) m.handicap_team = body.handicap_team;
       if (body.handicap_value != null) m.handicap_value = Number(body.handicap_value);
       if (body.odds_home != null) m.odds_home = Number(body.odds_home);
@@ -386,8 +397,18 @@
     }
     if (path === '/admin/lock' && method === 'POST') {
       const m = matches.find((x) => x.id === body.match_id);
-      if (m) { m.locked = body.locked ? 1 : 0; m.force_open = body.locked ? 0 : 1; }
-      return ok({ ok: true });
+      if (!m) return err(404, 'ไม่พบนัด');
+      let forced = false;
+      if (body.locked) { m.locked = 1; m.force_open = 0; }
+      else {
+        // reopening clears the lock; it only escalates to the all-gates
+        // override once the cutoff has passed, so it can't switch on a
+        // matchday the admin never opened
+        const ko = new Date(m.kickoff_time).getTime();
+        forced = isNaN(ko) || Date.now() >= ko - CUTOFF_MIN * MIN || m.status !== 'upcoming';
+        m.locked = 0; m.force_open = forced ? 1 : 0;
+      }
+      return ok({ ok: true, forced, day_status: dayStatus(m.play_date) });
     }
     if (path === '/teams' && method === 'POST') {
       const t = teams.find((x) => x.name === body.name.trim());
