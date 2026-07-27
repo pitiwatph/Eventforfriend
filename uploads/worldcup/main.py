@@ -328,6 +328,7 @@ class ProfileIn(BaseModel):
     password: Optional[str] = None
 
 class UserEditIn(BaseModel):
+    username: Optional[str] = None
     display_name: Optional[str] = None
     password: Optional[str] = None
 
@@ -665,13 +666,32 @@ def delete_user(user_id: int, user=Depends(require_admin)):
 @app.put("/admin/users/{user_id}")
 def edit_user(user_id: int, body: UserEditIn, user=Depends(require_admin)):
     conn = get_db()
+    target = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not target:
+        conn.close()
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้")
+    changed = []
+    if body.username is not None and body.username.strip():
+        new = body.username.strip()
+        if new != target["username"]:
+            clash = conn.execute("SELECT id FROM users WHERE username=? AND id!=?", (new, user_id)).fetchone()
+            if clash:
+                conn.close()
+                raise HTTPException(status_code=400, detail="ชื่อผู้ใช้นี้มีอยู่แล้ว")
+            conn.execute("UPDATE users SET username=? WHERE id=?", (new, user_id))
+            changed.append("username")
     if body.display_name is not None and body.display_name.strip():
         conn.execute("UPDATE users SET display_name=? WHERE id=?", (body.display_name.strip(), user_id))
+        changed.append("display_name")
     if body.password:
         conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(body.password), user_id))
+        changed.append("password")
     conn.commit()
     conn.close()
-    return {"ok": True}
+    # renaming or repassword invalidates that user's session — their token is
+    # signed with the old username, so tell the client to warn about it
+    return {"ok": True, "changed": changed,
+            "signed_out": bool({"username", "password"} & set(changed))}
 
 @app.post("/admin/credits")
 def add_credits(body: CreditIn, user=Depends(require_admin)):

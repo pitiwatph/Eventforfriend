@@ -333,9 +333,16 @@
     if (path.startsWith('/admin/users/') && method === 'PUT') {
       const t = users.find((u) => u.id === +path.split('/')[3]);
       if (!t) return err(404, 'ไม่พบผู้ใช้');
-      if (body.display_name) t.display_name = body.display_name;
-      if (body.password) t.password = body.password;
-      return ok({ ok: true });
+      const changed = [];
+      if (body.username && body.username.trim() && body.username.trim() !== t.username) {
+        const nu = body.username.trim();
+        if (users.some((u) => u.username === nu && u.id !== t.id)) return err(400, 'ชื่อผู้ใช้นี้มีอยู่แล้ว');
+        t.username = nu; changed.push('username');
+      }
+      if (body.display_name) { t.display_name = body.display_name; changed.push('display_name'); }
+      if (body.password) { t.password = body.password; changed.push('password'); }
+      return ok({ ok: true, changed,
+        signed_out: changed.includes('username') || changed.includes('password') });
     }
     if (path === '/admin/credits' && method === 'POST') {
       const t = users.find((u) => u.id === body.user_id);

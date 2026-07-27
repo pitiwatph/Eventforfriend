@@ -806,7 +806,7 @@
     $('pfName').value = S.me.display_name;
     $('pfUserRow').style.display = 'none';
     $('pfPass').value = '';
-    $('modal').classList.add('show');
+    $('modal').classList.add('open');
   }
   function editUser(id) {
     const u = S.users.find((x) => x.id === id);
@@ -817,9 +817,9 @@
     $('pfUser').value = u.username;
     $('pfUserRow').style.display = '';
     $('pfPass').value = '';
-    $('modal').classList.add('show');
+    $('modal').classList.add('open');
   }
-  function closeModal() { $('modal').classList.remove('show'); }
+  function closeModal() { $('modal').classList.remove('open'); }
   function modalBg(ev) { if (ev.target.id === 'modal') closeModal(); }
 
   async function saveProfile(ev) {
@@ -827,9 +827,19 @@
     const body = { display_name: $('pfName').value.trim() };
     if ($('pfPass').value) body.password = $('pfPass').value;
     try {
-      if (editingUser) await api('PUT', '/admin/users/' + editingUser, { body });
-      else await api('POST', '/me/update', { body });
-      toast('บันทึกแล้ว');
+      if (editingUser) {
+        const u = S.users.find((x) => x.id === editingUser);
+        const newName = $('pfUser').value.trim();
+        if (newName && (!u || newName !== u.username)) body.username = newName;
+        const r = await api('PUT', '/admin/users/' + editingUser, { body });
+        // changing the login name or password invalidates that user's token
+        toast(r && r.signed_out
+          ? 'บันทึกแล้ว · ผู้ใช้คนนี้ต้องเข้าสู่ระบบใหม่'
+          : 'บันทึกแล้ว');
+      } else {
+        await api('POST', '/me/update', { body });
+        toast('บันทึกแล้ว');
+      }
       closeModal();
       await reloadAll();
     } catch (e) { toast(e.detail || 'บันทึกไม่สำเร็จ', true); }
