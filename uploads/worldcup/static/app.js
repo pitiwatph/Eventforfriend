@@ -24,6 +24,8 @@
     hdcpTeam: null,      // admin: handicap side selection
     pick: {},            // match_id -> side the user has tapped (pre-submit)
     apiFixtures: [],
+    importable: [],     // provider fixtures offered for import
+    importPick: {},
     cutoffMin: 10,
     flatOdds: 2,      // 0 = each side priced separately
   };
@@ -262,7 +264,7 @@
         <div class="me-stats">
           <div class="stat stat-hot">
             <div class="v">${signed(m.net)}</div>
-            <div class="k">ได้/เสีย จากการแทง</div>
+            <div class="k">ได้/เสีย</div>
           </div>
           <div class="stat">
             <div class="v">${money(m.credits)}</div>
@@ -280,19 +282,12 @@
   const DAY_CHIP = { open: 'chip-open', closed: 'chip-done', draft: 'chip-soon' };
   const DAY_WORD = { open: 'เปิดรับ', closed: 'ปิดแล้ว', draft: 'ยังไม่เปิด' };
 
-  function renderDayTabs() {
-    const el = $('dayTabs');
-    if (!el) return;
-    if (!S.days.length) { el.innerHTML = ''; return; }
-    el.innerHTML = S.days.map((d) => `
-      <button class="lb-phase-tab ${d.play_date === S.day ? 'active' : ''}"
-              onclick="App.setDay('${d.play_date}')">
-        ${esc(fmtDay(d.play_date))}
-        <span class="chip ${DAY_CHIP[d.status] || 'chip-soon'}" style="margin-left:6px">${DAY_WORD[d.status] || ''}</span>
-      </button>`).join('');
-  }
-
-  function setDay(d) { S.day = d; renderDayTabs(); renderMatches(); }
+  // The matchday picker is gone from the player screen: with one day usually in
+  // play it was a single tab that could only read "not open yet", which looked
+  // stuck and contradicted a card underneath already saying it was open. Every
+  // fixture now shows its own state, grouped under a plain date heading, and
+  // the admin still opens and closes days from the admin screen.
+  function renderDayTabs() { /* removed — kept as a no-op for renderAll() */ }
 
   // ── match cards ──────────────────────────────────────────────────
   function betChip(m) {
@@ -386,18 +381,22 @@
   }
 
   function renderMatches() {
-    const list = S.matches.filter((m) => m.play_date === S.day);
     const el = $('matchList');
-    if (!S.days.length) {
+    // everything still to play, plus anything from today so a just-finished
+    // fixture doesn't vanish while people are looking at it
+    const today = new Date().toISOString().slice(0, 10);
+    const list = S.matches.filter((m) => m.status !== 'finished' || m.play_date >= today);
+    if (!list.length) {
       el.innerHTML = '<div class="empty">ยังไม่มีนัด — รอแอดมินเพิ่มโปรแกรม</div>';
       return;
     }
-    const day = S.days.find((d) => d.play_date === S.day);
-    const banner = day && day.status !== 'open'
-      ? `<div class="day-banner">${day.status === 'closed' ? '🔒 วันนี้ปิดรับพนันแล้ว' : '⏳ แอดมินยังไม่เปิดรับพนันของวันนี้'}</div>` : '';
-    el.innerHTML = banner + (list.length
-      ? list.map(matchCard).join('')
-      : '<div class="empty">ไม่มีนัดในวันนี้</div>');
+    const byDay = {};
+    list.forEach((m) => (byDay[m.play_date] = byDay[m.play_date] || []).push(m));
+    el.innerHTML = Object.keys(byDay).sort().map((d) => `
+      <div class="res-group">
+        <div class="res-stage-head">📅 ${esc(fmtDay(d))}<i>${byDay[d].length} นัด</i></div>
+        ${byDay[d].map(matchCard).join('')}
+      </div>`).join('');
     tick();   // fill the cutoff countdowns now instead of waiting a second
   }
 
@@ -865,6 +864,73 @@
     catch (e) { toast(e.detail || 'ลบไม่สำเร็จ', true); }
   }
 
+  // ── import fixtures from the score provider ──────────────────────
+  async function loadImport() {
+    const el = $('importList');
+    el.innerHTML = '<div class="sql-empty">กำลังค้นหา…</div>';
+    try {
+      const r = await api('GET', '/admin/import/fixtures?days=' + ($('impDays').value || 7));
+      S.importable = r.fixtures || [];
+      S.importPick = {};
+      // preselect everything not already added, so the common case is one tap
+      S.importable.forEach((f) => { if (!f.already) S.importPick[f.fixture_id] = true; });
+      renderImport(r);
+    } catch (e) {
+      el.innerHTML = `<div class="sql-err">${esc(e.detail || 'ค้นหาไม่สำเร็จ')}</div>`;
+    }
+  }
+
+  function renderImport(meta) {
+    const el = $('importList');
+    const list = S.importable || [];
+    const btn = $('impAddBtn');
+    if (!list.length) {
+      el.innerHTML = `<div class="sql-empty">${esc((meta && meta.note) || 'ไม่พบนัด')}</div>`;
+      if (btn) btn.style.display = 'none';
+      return;
+    }
+    const fresh = list.filter((f) => !f.already);
+    if (btn) btn.style.display = fresh.length ? '' : 'none';
+    const head = `<div class="sql-meta">พบ ${list.length} นัด · เพิ่มได้ ${fresh.length} นัด · `
+      + (meta && meta.with_line ? `มีราคาลูกต่อมาด้วย ${meta.with_line} นัด` : 'ไม่มีราคาลูกต่อมาด้วย — ต้องกรอกเอง') + '</div>';
+    el.innerHTML = head + list.map((f) => `
+      <div class="imp-row ${f.already ? 'is-done' : ''}">
+        <label class="imp-pick">
+          <input type="checkbox" ${f.already ? 'disabled' : (S.importPick[f.fixture_id] ? 'checked' : '')}
+                 onchange="App.toggleImport(${f.fixture_id}, this.checked)">
+        </label>
+        <div class="imp-info">
+          <div class="imp-teams">${flag(f.team_home)} ${esc(f.team_home)} <span class="faint">v</span> ${flag(f.team_away)} ${esc(f.team_away)}</div>
+          <div class="imp-meta">
+            ${esc(fmtKO(f.kickoff_time))}
+            ${f.has_line ? ` · <b>${esc(f.handicap_team)} ต่อ ${f.handicap_value}</b>` : ' · <span class="imp-noline">ยังไม่มีลูกต่อ</span>'}
+            ${f.already ? ' · <span class="imp-done">เพิ่มแล้ว</span>' : ''}
+            ${f.unknown_teams && f.unknown_teams.length ? ` · <span class="imp-noline">ไม่มีธง: ${esc(f.unknown_teams.join(', '))}</span>` : ''}
+          </div>
+        </div>
+      </div>`).join('');
+  }
+
+  function toggleImport(id, on) { S.importPick[id] = on; }
+
+  async function commitImport() {
+    const chosen = (S.importable || []).filter((f) => !f.already && S.importPick[f.fixture_id]);
+    if (!chosen.length) return toast('ยังไม่ได้เลือกนัด', true);
+    if (!confirm(`เพิ่ม ${chosen.length} นัดเข้าระบบ?\n(ยังไม่เปิดรับพนัน จนกว่าจะกดเปิดวัน)`)) return;
+    try {
+      const r = await api('POST', '/admin/import/fixtures', {
+        body: { fixtures: chosen.map((f) => ({
+          fixture_id: f.fixture_id, team_home: f.team_home, team_away: f.team_away,
+          kickoff_time: f.kickoff_time,
+          handicap_team: f.handicap_team, handicap_value: f.handicap_value,
+        })) },
+      });
+      toast(`เพิ่ม ${r.created} นัด${r.skipped ? ` · ข้าม ${r.skipped} (มีอยู่แล้ว)` : ''}`);
+      await reloadAll();
+      await loadImport();
+    } catch (e) { toast(e.detail || 'เพิ่มนัดไม่สำเร็จ', true); }
+  }
+
   // live scores / provider mapping
   function liveMatches() { return S.matches.filter((m) => m.status !== 'finished'); }
   function renderAdminLive() {
@@ -951,11 +1017,12 @@
 
   window.App = {
     doLogin, logout, go, openProfile, closeModal, modalBg, saveProfile, editUser,
-    setDay, pick, setStake, previewStake, placeBet, cancelBet,
+    pick, setStake, previewStake, placeBet, cancelBet,
     addMatch, saveOdds, setResult, toggleLock, delMatch, setDayStatus,
     createUser, delUser, giveCredits,
     saveTeam, editTeam, delTeam, updateTeamPrev, onTeamInput, onFlagInput, setHdcp,
     loadApiFixtures, mapFixture, fetchScores, sqlSample, runQuery,
+    loadImport, toggleImport, commitImport,
     reloadAll,
   };
 

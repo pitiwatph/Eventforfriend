@@ -65,8 +65,6 @@
     <!-- ── BET ── -->
     <section class="view active" id="view-matches" data-screen-label="Bet">
       <div id="meHero"></div>
-      <div class="section-label"><span class="dot"></span> เลือกวันแข่ง · Matchday</div>
-      <div class="lb-phase-tabs" id="dayTabs"></div>
       <div id="matchList"></div>
     </section>
 
@@ -117,9 +115,26 @@
         <div id="adminDays"></div>
       </div>
 
+      <!-- Import fixtures from the score provider -->
+      <div class="card">
+        <div class="section-label" style="margin-top:0"><span class="dot"></span> 📥 ดึงโปรแกรมแข่งอัตโนมัติ · Import fixtures</div>
+        <div class="flag-help">ดึงคู่แข่ง + เวลาเตะจาก ESPN (ฟรี ไม่ต้องใช้ key) · <b>ถ้ามีราคาลูกต่อมาด้วยจะใส่ให้อัตโนมัติ</b> ถ้าไม่มีให้กรอกเอง · วันที่นำเข้าใหม่จะยังไม่เปิดรับพนันจนกว่าจะกดเปิด</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+          <select class="in in-mini" id="impDays" style="width:110px">
+            <option value="3">3 วันข้างหน้า</option>
+            <option value="7" selected>7 วันข้างหน้า</option>
+            <option value="14">14 วันข้างหน้า</option>
+            <option value="30">30 วันข้างหน้า</option>
+          </select>
+          <button class="btn btn-ghost btn-sm" onclick="App.loadImport()">🔍 ค้นหานัด</button>
+          <button class="btn btn-gold btn-sm" id="impAddBtn" style="display:none" onclick="App.commitImport()">+ เพิ่มที่เลือก</button>
+        </div>
+        <div id="importList"></div>
+      </div>
+
       <!-- New fixture -->
       <div class="card">
-        <div class="section-label" style="margin-top:0"><span class="dot"></span> เพิ่มนัดใหม่ · New fixture</div>
+        <div class="section-label" style="margin-top:0"><span class="dot"></span> เพิ่มนัดเอง · New fixture</div>
         <form id="addMatchForm" onsubmit="App.addMatch(event)">
           <div class="form-2">
             <div class="form-row">

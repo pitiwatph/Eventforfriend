@@ -691,6 +691,20 @@ input.in::placeholder{color:var(--faint)}
 .led-amt b.up{color:var(--win)}
 .led-amt b.down{color:var(--loss)}
 
+/* fixture import picker */
+.imp-row{
+  display:flex;align-items:center;gap:10px;padding:9px 11px;margin-top:7px;
+  border-radius:12px;border:1px solid var(--line-soft);background:rgba(13,57,100,.4);
+}
+.imp-row.is-done{opacity:.5}
+.imp-pick input{width:20px;height:20px;accent-color:var(--gold);cursor:pointer}
+.imp-info{flex:1;min-width:0}
+.imp-teams{font-family:var(--font-display);font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.imp-meta{font-size:10.5px;color:var(--faint);margin-top:2px}
+.imp-meta b{color:var(--gold-bright)}
+.imp-noline{color:var(--half)}
+.imp-done{color:var(--win)}
+
 /* leaderboard headline is a signed win/loss, so it needs the same colouring */
 .lb-row .lb-pts.up{color:var(--win)}
 .lb-row .lb-pts.down{color:var(--loss)}

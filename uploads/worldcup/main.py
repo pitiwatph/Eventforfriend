@@ -1101,14 +1101,65 @@ def _espn_parse(payload: dict) -> list:
             out.append({
                 "id": int(e["id"]),
                 "date": (e.get("date") or "")[:16].replace("T", " "),
+                "iso": e.get("date") or "",          # full UTC stamp, for import
                 "home": _nm(home), "away": _nm(away),
                 "score_home": _sc(home), "score_away": _sc(away),
                 "live": state == "in",
                 "final": bool(stype.get("completed")) or state == "post",
+                **_espn_line(comp, _nm(home), _nm(away)),
             })
         except (KeyError, StopIteration, TypeError, ValueError):
             continue
     return out
+
+def _espn_line(comp: dict, home: str, away: str) -> dict:
+    """Pull a handicap line out of an ESPN competition, if one is published.
+
+    ESPN carries odds for some competitions and not others, and the shape
+    varies — sometimes a numeric `spread`, sometimes only a `details` string
+    like "THA -1.5". Both are read, and everything is optional: when nothing is
+    on offer the fixture still imports and the admin sets the line by hand.
+    """
+    blank = {"hdcp_team": None, "hdcp_value": None, "odds_note": ""}
+    odds = comp.get("odds")
+    if not odds:
+        return blank
+    o = odds[0] if isinstance(odds, list) else odds
+    if not isinstance(o, dict):
+        return blank
+
+    spread = o.get("spread")
+    details = (o.get("details") or "").strip()
+    value = None
+    if isinstance(spread, (int, float)):
+        value = abs(float(spread))
+    elif details:
+        m = re.search(r"([+-]?\d+(?:\.\d+)?)", details)
+        if m:
+            value = abs(float(m.group(1)))
+    if value is None:
+        return blank
+
+    # Which side is giving the goals. ESPN marks a favourite explicitly; the
+    # details string otherwise names it by abbreviation.
+    fav = None
+    for key, name in (("homeTeamOdds", home), ("awayTeamOdds", away)):
+        side = o.get(key) or {}
+        if side.get("favorite"):
+            fav = name
+    if fav is None and details:
+        tag = details.split()[0].strip().lower()
+        for name in (home, away):
+            if tag and (_norm_team(name).startswith(_norm_team(tag))
+                        or _norm_team(tag).startswith(_norm_team(name)[:3])):
+                fav = name
+                break
+    if fav is None:
+        return blank
+    # snap to the quarter-goal grid the rest of the app works on
+    value = round(value * 4) / 4
+    return {"hdcp_team": fav, "hdcp_value": value,
+            "odds_note": details or f"spread {spread}"}
 
 def _apifootball_get(params: dict) -> dict:
     qs = urllib.parse.urlencode(params)
@@ -1209,6 +1260,111 @@ def apifootball_map(body: MapIn, user=Depends(require_admin)):
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="ไม่พบนัดนี้")
     return {"ok": True, "match_id": body.match_id, "fixture_id": body.fixture_id}
+
+class ImportItem(BaseModel):
+    fixture_id: int
+    team_home: str
+    team_away: str
+    kickoff_time: str                  # Bangkok-local 'YYYY-MM-DDTHH:MM'
+    handicap_team: Optional[str] = None
+    handicap_value: Optional[float] = None
+    stage: str = "Group Stage"
+
+class ImportIn(BaseModel):
+    fixtures: List[ImportItem]
+
+def _utc_iso_to_bkk(iso: str) -> Optional[str]:
+    """ESPN stamps kickoff in UTC ('2026-07-28T12:00Z'); we store Bangkok."""
+    s = (iso or "").replace("Z", "").strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
+        try:
+            return (datetime.strptime(s[:19] if len(s) >= 19 else s, fmt)
+                    + timedelta(hours=7)).strftime("%Y-%m-%dT%H:%M")
+        except ValueError:
+            continue
+    return None
+
+@app.get("/admin/import/fixtures")
+def import_preview(days: int = 7, user=Depends(require_admin)):
+    """Upcoming fixtures from the score provider, ready to be added.
+
+    Anything already bound to one of our matches is flagged rather than
+    hidden, so the admin can see the whole schedule and tell at a glance what
+    is left to add. A handicap line rides along when the provider publishes
+    one; `has_line` says whether it did.
+    """
+    if not _provider_ready():
+        raise HTTPException(status_code=400, detail="provider=apifootball แต่ยังไม่ได้ตั้ง APIFOOTBALL_KEY")
+    days = max(1, min(days, 30))
+    today = datetime.utcnow()
+    dates = {(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(days)}
+    try:
+        fx = _fixtures_for_dates(dates)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"เรียกโปรแกรมแข่งไม่สำเร็จ: {e}")
+
+    conn = get_db()
+    taken = {r["apifootball_fixture_id"] for r in conn.execute(
+        "SELECT apifootball_fixture_id FROM matches WHERE apifootball_fixture_id IS NOT NULL").fetchall()}
+    known = {r["name"] for r in conn.execute("SELECT name FROM teams").fetchall()}
+    conn.close()
+
+    out = []
+    for f in sorted(fx, key=lambda x: (x["date"], x["id"])):
+        if f["final"]:
+            continue
+        ko = _utc_iso_to_bkk(f.get("iso") or "") or (f["date"].replace(" ", "T") if f["date"] else None)
+        if not ko:
+            continue
+        out.append({
+            "fixture_id": f["id"], "team_home": f["home"], "team_away": f["away"],
+            "kickoff_time": ko, "play_date": _play_date_of(ko),
+            "handicap_team": f.get("hdcp_team"), "handicap_value": f.get("hdcp_value"),
+            "has_line": f.get("hdcp_value") is not None,
+            "odds_note": f.get("odds_note") or "",
+            "already": f["id"] in taken,
+            # a name the registry doesn't know still imports; the flag just
+            # warns the admin that the flag image will fall back to initials
+            "unknown_teams": [t for t in (f["home"], f["away"]) if t not in known],
+        })
+    with_line = sum(1 for x in out if x["has_line"])
+    return {"ok": True, "provider": SCORE_PROVIDER, "league": ESPN_LEAGUE,
+            "days": days, "count": len(out), "with_line": with_line,
+            "fixtures": out,
+            "note": "" if out else f"ไม่พบนัดในช่วง {days} วันข้างหน้า (league={ESPN_LEAGUE})"}
+
+@app.post("/admin/import/fixtures")
+def import_commit(body: ImportIn, user=Depends(require_admin)):
+    """Create matches from chosen provider fixtures, bound to their event id.
+
+    Idempotent on the provider's id: re-importing the same fixture is skipped
+    rather than duplicated. New matchdays land as 'draft', so importing a
+    schedule never opens betting by itself.
+    """
+    conn = get_db()
+    created, skipped = [], []
+    flags = {r["name"]: r["flag"] for r in conn.execute("SELECT name, flag FROM teams").fetchall()}
+    for it in body.fixtures:
+        if conn.execute("SELECT 1 FROM matches WHERE apifootball_fixture_id=?", (it.fixture_id,)).fetchone():
+            skipped.append(it.fixture_id)
+            continue
+        ht = it.handicap_team if it.handicap_team in (it.team_home, it.team_away) else it.team_home
+        hv = float(it.handicap_value) if it.handicap_value is not None else 0.0
+        odds = FLAT_ODDS or 1.90
+        cur = conn.execute("""INSERT INTO matches
+            (team_home,team_away,team_home_flag,team_away_flag,stage,handicap_team,handicap_value,
+             odds_home,odds_away,kickoff_time,play_date,apifootball_fixture_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (it.team_home, it.team_away, flags.get(it.team_home, ""), flags.get(it.team_away, ""),
+             it.stage, ht, hv, odds, odds, it.kickoff_time,
+             _play_date_of(it.kickoff_time), it.fixture_id))
+        conn.execute("""INSERT INTO odds_history (match_id, handicap_team, handicap_value, odds_home, odds_away, source)
+                        VALUES (?,?,?,?,?,'import')""", (cur.lastrowid, ht, hv, odds, odds))
+        created.append({"id": cur.lastrowid, "fixture_id": it.fixture_id,
+                        "match": f"{it.team_home} v {it.team_away}"})
+    conn.commit()
+    conn.close()
+    return {"ok": True, "created": len(created), "skipped": len(skipped), "detail": created}
 
 @app.get("/admin/fetch_scores")
 def fetch_scores(user=Depends(require_admin)):

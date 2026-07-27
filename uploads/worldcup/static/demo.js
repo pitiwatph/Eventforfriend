@@ -429,6 +429,13 @@
       if (i >= 0) teams.splice(i, 1);
       return ok({ ok: true });
     }
+    if (path === '/admin/import/fixtures' && method === 'GET') {
+      return ok({ ok: true, provider: 'demo', league: 'aff.championship', days: 7,
+        count: 0, with_line: 0, fixtures: [], note: 'โหมดเดโม — ไม่มีข้อมูลจริง' });
+    }
+    if (path === '/admin/import/fixtures' && method === 'POST') {
+      return ok({ ok: true, created: 0, skipped: 0, detail: [] });
+    }
     if (path === '/admin/apifootball/fixtures') {
       return ok({ ok: true, provider: 'demo', count: 0, dates: [], fixtures: [], note: 'โหมดเดโม — ไม่มีข้อมูลจริง' });
     }
